@@ -10,10 +10,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type HelmComparison struct {
+	Before          HelmChart
+	After           HelmChart
+	AddedImages     []*ContainerImage
+	RemovedImages   []*ContainerImage
+	ChangedImages   []*ContainerImage
+	UnchangedImages []*ContainerImage
+	RemovedCVEs     []imageScan.Vulnerability
+	AddedCVEs       []imageScan.Vulnerability
+}
+
 // HelmChart represents a Helm chart with its version
 type HelmChart struct {
-	Name    string
-	Version string
+	Name           string
+	Version        string
+	HelmRepo       string
+	ContainsImages []*ContainerImage
+}
+
+type ContainerImage struct {
+	Repository                    string
+	Tag                           string
+	ImageName                     string
+	ScanResult                    imageScan.ScanResult
+	VulnerabilityCountsBySeverity imageScan.SeverityCounts
+	Vulnerabilities               []imageScan.Vulnerability
 }
 
 // ComparisonResult represents the comparison between two Helm chart versions
@@ -78,11 +100,12 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 	for _, img := range changed {
 		beforeImg := fmt.Sprintf("%s/%s:%s", repoBeforeMap[img], img, changedMap[img])
 		afterImg := fmt.Sprintf("%s/%s:%s", repoAfterMap[img], img, afterMap[img])
-		beforeScan, err := imageScan.ScanImage(beforeImg)
+		// this trim is a hack until i can figure out why ai screwed this up lol
+		beforeScan, err := imageScan.ScanImage(strings.Trim(strings.Trim(strings.Trim(beforeImg, "/"), ":"), " "))
 		if err != nil {
 			return ComparisonResult{}, fmt.Errorf("error scanning before image: %w", err)
 		}
-		afterScan, err := imageScan.ScanImage(afterImg)
+		afterScan, err := imageScan.ScanImage(strings.Trim(strings.Trim(strings.Trim(afterImg, "/"), ":"), " "))
 		if err != nil {
 			return ComparisonResult{}, fmt.Errorf("error scanning after image: %w", err)
 		}

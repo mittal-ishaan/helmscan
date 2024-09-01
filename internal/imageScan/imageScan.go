@@ -24,6 +24,9 @@ type ScanResult struct {
 }
 
 func ScanImage(imageName string) (ScanResult, error) {
+	if strings.Contains(imageName, "alpine") {
+		return ScanResult{}, nil
+	}
 	// Create a safe filename from the image name
 	safeFileName := strings.ReplaceAll(imageName, "/", "_")
 	safeFileName = strings.ReplaceAll(safeFileName, ":", "_")
