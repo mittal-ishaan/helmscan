@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
@@ -58,7 +57,7 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 
 	fmt.Printf("Extracted images. Before: %d, After: %d\n", len(beforeImages), len(afterImages))
 
-	added, removed, common := compareImageLists(beforeImages, afterImages)
+	added, removed, changed, common, changedMap := compareImageLists(beforeImages, afterImages)
 
 	addedReports, err := generateImageReports(added)
 	if err != nil {
@@ -70,9 +69,34 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 		return ComparisonResult{}, fmt.Errorf("error generating reports for removed images: %w", err)
 	}
 
-	changedImages, unchangedImages, err := compareCommonImages(common)
+	changedReports, unchangedReports, err := compareCommonImages(common)
 	if err != nil {
 		return ComparisonResult{}, fmt.Errorf("error comparing common images: %w", err)
+	}
+
+	// Generate reports for changed images
+	for _, img := range changed {
+		base, _ := splitImageName(img)
+		beforeTag := changedMap[img]
+		beforeImg := fmt.Sprintf("%s:%s", base, beforeTag)
+		afterImg := img
+		beforeScan, err := imageScan.ScanImage(beforeImg)
+		if err != nil {
+			return ComparisonResult{}, fmt.Errorf("error scanning before image: %w", err)
+		}
+		afterScan, err := imageScan.ScanImage(afterImg)
+		if err != nil {
+			return ComparisonResult{}, fmt.Errorf("error scanning after image: %w", err)
+		}
+		beforeReport := parseImageScanResult(beforeScan)
+		afterReport := parseImageScanResult(afterScan)
+		diff := imageScan.CompareScans(beforeScan, afterScan)
+		changedReports = append(changedReports, ImageComparison{
+			Image:        img,
+			BeforeReport: beforeReport,
+			AfterReport:  afterReport,
+			Diff:         *diff,
+		})
 	}
 
 	return ComparisonResult{
@@ -80,8 +104,8 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 		After:           after,
 		AddedImages:     addedReports,
 		RemovedImages:   removedReports,
-		ChangedImages:   changedImages,
-		UnchangedImages: unchangedImages, // Include unchanged images in the result
+		ChangedImages:   changedReports,
+		UnchangedImages: unchangedReports,
 	}, nil
 }
 
@@ -135,8 +159,7 @@ func compareCommonImages(images []string) ([]ImageComparison, []ImageReport, err
 		diff := imageScan.CompareScans(beforeScan, afterScan)
 
 		// Check if the diff is empty by comparing vulnerability counts
-		if diff.RemovedCVEs.Low == 0 && diff.RemovedCVEs.Medium == 0 && diff.RemovedCVEs.High == 0 && diff.RemovedCVEs.Critical == 0 &&
-			diff.AddedCVEs.Low == 0 && diff.AddedCVEs.Medium == 0 && diff.AddedCVEs.High == 0 && diff.AddedCVEs.Critical == 0 {
+		if len(diff.RemovedByLevel) == 0 && len(diff.AddedByLevel) == 0 {
 			// If there are no differences, add to unchanged reports
 			unchangedReports = append(unchangedReports, afterReport)
 		} else {
@@ -179,17 +202,14 @@ func extractImagesFromChart(chart HelmChart) ([]string, error) {
 
 	fmt.Printf("Helm command output length: %d bytes\n", len(output))
 
-	// Write output to a file for debugging
-	filename := fmt.Sprintf("%s_%s_helm_output.yaml", strings.ReplaceAll(chart.Name, "/", "_"), chart.Version)
-	currentDir, _ := os.Getwd()
-	absFilename := filepath.Join(currentDir, filename)
-	fmt.Printf("Attempting to write output to file: %s\n", absFilename)
-	err = os.WriteFile(absFilename, output, 0644)
+	// Write output to a file in the working-files/ directory for debugging
+	filename := fmt.Sprintf("working-files/%s_%s_helm_output.yaml", strings.ReplaceAll(chart.Name, "/", "_"), chart.Version)
+	err = os.WriteFile(filename, output, 0644)
 	if err != nil {
 		fmt.Printf("Error writing output to file: %v\n", err)
 	} else {
-		fmt.Printf("Helm template output written to %s\n", absFilename)
-		fileInfo, _ := os.Stat(absFilename)
+		fmt.Printf("Helm template output written to %s\n", filename)
+		fileInfo, _ := os.Stat(filename)
 		if fileInfo != nil {
 			fmt.Printf("File size: %d bytes\n", fileInfo.Size())
 		}
@@ -254,91 +274,138 @@ func uniqueStrings(slice []string) []string {
 }
 
 // compareImageLists compares two lists of images and returns added, removed, and common images
-func compareImageLists(before, after []string) (added, removed, common []string) {
-	beforeMap := make(map[string]bool)
-	afterMap := make(map[string]bool)
+func compareImageLists(before, after []string) (added, removed, changed, common []string, changedMap map[string]string) {
+	beforeMap := make(map[string]string)
+	afterMap := make(map[string]string)
+	changedMap = make(map[string]string)
 
 	for _, img := range before {
-		beforeMap[img] = true
+		base, tag := splitImageName(img)
+		beforeMap[base] = tag
 	}
 
 	for _, img := range after {
-		afterMap[img] = true
-		if !beforeMap[img] {
+		base, tag := splitImageName(img)
+		afterMap[base] = tag
+		if beforeTag, exists := beforeMap[base]; !exists {
 			added = append(added, img)
+		} else if beforeTag != tag {
+			changed = append(changed, img)
+			changedMap[img] = beforeTag
 		} else {
 			common = append(common, img)
 		}
 	}
 
 	for _, img := range before {
-		if !afterMap[img] {
+		base, tag := splitImageName(img)
+		if afterTag, exists := afterMap[base]; !exists {
 			removed = append(removed, img)
+		} else if afterTag != tag {
+			// Ensure the changed image is not added to removed list
+			if _, alreadyChanged := changedMap[fmt.Sprintf("%s:%s", base, afterTag)]; !alreadyChanged {
+				removed = append(removed, img)
+			}
 		}
 	}
 
 	return
 }
 
-// generateHelmComparisonReport generates a report for the comparison of two Helm chart versions
-func generateHelmComparisonReport(result ComparisonResult) string {
+func splitImageName(image string) (base, tag string) {
+	parts := strings.Split(image, ":")
+	base = parts[0]
+	if len(parts) > 1 {
+		tag = parts[1]
+	} else {
+		tag = "latest"
+	}
+	return
+}
+
+// GenerateHelmComparisonReport generates a report for the comparison of two Helm chart versions
+func GenerateHelmComparisonReport(result ComparisonResult) string {
 	var report strings.Builder
 
-	report.WriteString(fmt.Sprintf("Helm Chart Comparison Report\n"))
-	report.WriteString(fmt.Sprintf("Before: %s@%s\n", result.Before.Name, result.Before.Version))
-	report.WriteString(fmt.Sprintf("After: %s@%s\n", result.After.Name, result.After.Version))
+	report.WriteString("# Helm Chart Comparison Report\n")
+	report.WriteString(fmt.Sprintf("**Before:** %s@%s\n", result.Before.Name, result.Before.Version))
+	report.WriteString(fmt.Sprintf("**After:** %s@%s\n", result.After.Name, result.After.Version))
 
-	// Calculate overall summary
-	totalImages := len(result.AddedImages) + len(result.RemovedImages) + len(result.ChangedImages) + len(result.UnchangedImages)
-	totalLow, totalMedium, totalHigh, totalCritical := 0, 0, 0, 0
-
-	for _, imageReport := range append(result.AddedImages, result.RemovedImages...) {
-		totalLow += imageReport.Vulnerabilities.Low
-		totalMedium += imageReport.Vulnerabilities.Medium
-		totalHigh += imageReport.Vulnerabilities.High
-		totalCritical += imageReport.Vulnerabilities.Critical
+	// Add summary for each Helm chart
+	report.WriteString(fmt.Sprintf("\n## Summary for Before Helm Chart (%s@%s):\n", result.Before.Name, result.Before.Version))
+	beforeLow, beforeMedium, beforeHigh, beforeCritical := 0, 0, 0, 0
+	beforeImages := len(result.RemovedImages) + len(result.ChangedImages) + len(result.UnchangedImages)
+	for _, imageReport := range result.RemovedImages {
+		beforeLow += imageReport.Vulnerabilities.Low
+		beforeMedium += imageReport.Vulnerabilities.Medium
+		beforeHigh += imageReport.Vulnerabilities.High
+		beforeCritical += imageReport.Vulnerabilities.Critical
 	}
+	report.WriteString(fmt.Sprintf("**Images:** %d\n", beforeImages))
+	report.WriteString(fmt.Sprintf("**Critical:** %d\n", beforeCritical))
+	report.WriteString(fmt.Sprintf("**High:** %d\n", beforeHigh))
+	report.WriteString(fmt.Sprintf("**Medium:** %d\n", beforeMedium))
+	report.WriteString(fmt.Sprintf("**Low:** %d\n", beforeLow))
 
-	for _, imageComparison := range result.ChangedImages {
-		totalLow += imageComparison.AfterReport.Vulnerabilities.Low
-		totalMedium += imageComparison.AfterReport.Vulnerabilities.Medium
-		totalHigh += imageComparison.AfterReport.Vulnerabilities.High
-		totalCritical += imageComparison.AfterReport.Vulnerabilities.Critical
+	report.WriteString(fmt.Sprintf("\n## Summary for After Helm Chart (%s@%s):\n", result.After.Name, result.After.Version))
+	afterLow, afterMedium, afterHigh, afterCritical := 0, 0, 0, 0
+	afterImages := len(result.AddedImages) + len(result.ChangedImages) + len(result.UnchangedImages)
+	for _, imageReport := range result.AddedImages {
+		afterLow += imageReport.Vulnerabilities.Low
+		afterMedium += imageReport.Vulnerabilities.Medium
+		afterHigh += imageReport.Vulnerabilities.High
+		afterCritical += imageReport.Vulnerabilities.Critical
 	}
+	report.WriteString(fmt.Sprintf("**Images:** %d\n", afterImages))
+	report.WriteString(fmt.Sprintf("**Critical:** %d\n", afterCritical))
+	report.WriteString(fmt.Sprintf("**High:** %d\n", afterHigh))
+	report.WriteString(fmt.Sprintf("**Medium:** %d\n", afterMedium))
+	report.WriteString(fmt.Sprintf("**Low:** %d\n", afterLow))
 
-	for _, imageReport := range result.UnchangedImages {
-		totalLow += imageReport.Vulnerabilities.Low
-		totalMedium += imageReport.Vulnerabilities.Medium
-		totalHigh += imageReport.Vulnerabilities.High
-		totalCritical += imageReport.Vulnerabilities.Critical
-	}
-
-	// Add overall summary to the report
-	report.WriteString(fmt.Sprintf("\nOverall Summary:\n"))
-	report.WriteString(fmt.Sprintf("Images: %d\n", totalImages))
-	report.WriteString(fmt.Sprintf("Low: %d\n", totalLow))
-	report.WriteString(fmt.Sprintf("Medium: %d\n", totalMedium))
-	report.WriteString(fmt.Sprintf("High: %d\n", totalHigh))
-	report.WriteString(fmt.Sprintf("Critical: %d\n", totalCritical))
-
-	report.WriteString("\nAdded Images:\n")
+	// Add details for added, removed, changed, and unchanged images
+	report.WriteString("\n## Added Images:\n")
 	for _, image := range result.AddedImages {
 		report.WriteString(fmt.Sprintf("- %s\n", image.Image))
 	}
 
-	report.WriteString("\nRemoved Images:\n")
+	report.WriteString("\n## Removed Images:\n")
 	for _, image := range result.RemovedImages {
 		report.WriteString(fmt.Sprintf("- %s\n", image.Image))
 	}
 
-	report.WriteString("\nChanged Images:\n")
+	report.WriteString("\n## Changed Images:\n")
 	for _, image := range result.ChangedImages {
 		report.WriteString(fmt.Sprintf("- %s\n", image.Image))
 	}
 
-	report.WriteString("\nUnchanged Images:\n")
+	report.WriteString("\n## Unchanged Images:\n")
 	for _, image := range result.UnchangedImages {
 		report.WriteString(fmt.Sprintf("- %s\n", image.Image))
+	}
+
+	// List all CVEs by severity removed from the right that existed in the left
+	report.WriteString("\n## Removed CVEs by Severity:\n")
+	removedCVEs := make(map[string]map[string][]string)
+	for _, imageComparison := range result.ChangedImages {
+		for severity, cves := range imageComparison.Diff.RemovedByLevel {
+			if _, exists := removedCVEs[severity]; !exists {
+				removedCVEs[severity] = make(map[string][]string)
+			}
+			for _, cve := range cves {
+				removedCVEs[severity][cve] = append(removedCVEs[severity][cve], imageComparison.Image)
+			}
+		}
+	}
+
+	// Create a markdown table for removed CVEs
+	report.WriteString("\n| CVE Name | Severity | Images |\n")
+	report.WriteString("|----------|----------|--------|\n")
+	for _, severity := range []string{"critical", "high", "medium", "low"} {
+		if cves, ok := removedCVEs[severity]; ok {
+			for cve, images := range cves {
+				report.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cve, strings.Title(severity), strings.Join(images, ", ")))
+			}
+		}
 	}
 
 	return report.String()

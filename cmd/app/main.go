@@ -27,6 +27,11 @@ func init() {
 }
 
 func main() {
+	// Ensure the working-files directory exists
+	if err := ensureWorkingFilesDir(); err != nil {
+		logger.Fatalf("Failed to create working-files directory: %v", err)
+	}
+
 	compareFlag := flag.Bool("compare", false, "Compare two images or Helm charts")
 	reportFlag := flag.Bool("report", false, "Save the report to a file")
 	flag.Parse()
@@ -139,7 +144,44 @@ func scanSingleHelmChart(chartRef string) {
 		logger.Errorf("Error scanning Helm chart: %v", err)
 		return
 	}
-	fmt.Println(generateHelmComparisonReport(result))
+	fmt.Println(helmscan.GenerateHelmComparisonReport(result))
+}
+
+func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
+	parts1 := strings.Split(chartRef1, "@")
+	parts2 := strings.Split(chartRef2, "@")
+	if len(parts1) != 2 || len(parts2) != 2 {
+		logger.Fatalf("Invalid Helm chart reference(s). Expected format: repo/chart@version")
+	}
+
+	chart1 := helmscan.HelmChart{Name: parts1[0], Version: parts1[1]}
+	chart2 := helmscan.HelmChart{Name: parts2[0], Version: parts2[1]}
+
+	logger.Infof("Comparing Helm charts: %s and %s", chartRef1, chartRef2)
+	result, err := helmscan.CompareHelmCharts(chart1, chart2)
+	if err != nil {
+		logger.Errorf("Error comparing Helm charts: %v", err)
+		fmt.Printf("Detailed error: %+v\n", err)
+		return
+	}
+
+	// Generate the report
+	report := helmscan.GenerateHelmComparisonReport(result)
+
+	// Print the report
+	fmt.Println(report)
+
+	// Save the report if requested
+	if saveReport {
+		filename := generateFilename(chartRef1, chartRef2)
+		filepath := filepath.Join("working-files", filename)
+		err := saveReportToFile(report, filepath)
+		if err != nil {
+			logger.Errorf("Failed to save report: %v", err)
+		} else {
+			logger.Infof("Report saved to %s", filepath)
+		}
+	}
 }
 
 func compareImages(imageURL1, imageURL2 string, saveReport bool) {
@@ -180,45 +222,12 @@ func compareImages(imageURL1, imageURL2 string, saveReport bool) {
 	// Save the report if requested
 	if saveReport {
 		filename := generateFilename(imageURL1, imageURL2)
-		err := saveReportToFile(report, filename)
+		filepath := filepath.Join("working-files", filename)
+		err := saveReportToFile(report, filepath)
 		if err != nil {
 			logger.Errorf("Failed to save report: %v", err)
 		} else {
-			logger.Infof("Report saved to %s", filename)
-		}
-	}
-}
-
-func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
-	parts1 := strings.Split(chartRef1, "@")
-	parts2 := strings.Split(chartRef2, "@")
-	if len(parts1) != 2 || len(parts2) != 2 {
-		logger.Fatalf("Invalid Helm chart reference(s). Expected format: repo/chart@version")
-	}
-
-	chart1 := helmscan.HelmChart{Name: parts1[0], Version: parts1[1]}
-	chart2 := helmscan.HelmChart{Name: parts2[0], Version: parts2[1]}
-
-	logger.Infof("Comparing Helm charts: %s and %s", chartRef1, chartRef2)
-	result, err := helmscan.CompareHelmCharts(chart1, chart2)
-	if err != nil {
-		logger.Errorf("Error comparing Helm charts: %v", err)
-		fmt.Printf("Detailed error: %+v\n", err)
-		return
-	}
-
-	logger.Infof("Generating comparison report")
-	report := generateHelmComparisonReport(result)
-	fmt.Println(report)
-
-	if saveReport {
-		filename := generateFilename(chartRef1, chartRef2)
-		logger.Infof("Saving report to file: %s", filename)
-		err := saveReportToFile(report, filename)
-		if err != nil {
-			logger.Errorf("Failed to save report: %v", err)
-		} else {
-			logger.Infof("Report saved to %s", filename)
+			logger.Infof("Report saved to %s", filepath)
 		}
 	}
 }
@@ -266,42 +275,6 @@ func generateReport(report *imageScan.VulnerabilityReport) string {
 	return builder.String()
 }
 
-func generateHelmReport(result helmscan.ComparisonResult) string {
-	// Implement this function to generate a report for a single Helm chart scan
-	// You can use a similar approach as in the generateReport function
-	return generateHelmComparisonReport(result)
-}
-
-func generateHelmComparisonReport(result helmscan.ComparisonResult) string {
-	// Implement this function to generate a comparison report for two Helm charts
-	// You can use a similar approach as in the generateReport function
-	var report strings.Builder
-
-	fmt.Fprintf(&report, "Helm Chart Comparison Report\n")
-	fmt.Fprintf(&report, "Before: %s@%s\n", result.Before.Name, result.Before.Version)
-	fmt.Fprintf(&report, "After: %s@%s\n\n", result.After.Name, result.After.Version)
-
-	fmt.Fprintf(&report, "Added Images:\n")
-	for _, img := range result.AddedImages {
-		fmt.Fprintf(&report, "- %s\n", img.Image)
-	}
-
-	fmt.Fprintf(&report, "\nRemoved Images:\n")
-	for _, img := range result.RemovedImages {
-		fmt.Fprintf(&report, "- %s\n", img.Image)
-	}
-
-	fmt.Fprintf(&report, "\nChanged Images:\n")
-	for _, img := range result.ChangedImages {
-		fmt.Fprintf(&report, "- %s\n", img.Image)
-		fmt.Fprintf(&report, "  Before: %+v\n", img.BeforeReport.Vulnerabilities)
-		fmt.Fprintf(&report, "  After: %+v\n", img.AfterReport.Vulnerabilities)
-		fmt.Fprintf(&report, "  Diff: %+v\n", img.Diff)
-	}
-
-	return report.String()
-}
-
 func generateFilename(ref1, ref2 string) string {
 	// Extract chart names and versions
 	parts1 := strings.Split(ref1, "@")
@@ -313,7 +286,7 @@ func generateFilename(ref1, ref2 string) string {
 	version2 := parts2[1]
 
 	// Create a sanitized filename
-	filename := fmt.Sprintf("%s@%s-%s@%s.trivy.difference.txt", chartName1, version1, chartName2, version2)
+	filename := fmt.Sprintf("%s@%s-%s@%s", chartName1, version1, chartName2, version2)
 	filename = strings.ReplaceAll(filename, "/", "_")
 	filename = strings.ReplaceAll(filename, ":", "_")
 	filename = strings.ReplaceAll(filename, ".", "_")
@@ -321,6 +294,7 @@ func generateFilename(ref1, ref2 string) string {
 	filename = strings.ReplaceAll(filename, "(", "_")
 	filename = strings.ReplaceAll(filename, ")", "_")
 	filename = strings.ReplaceAll(filename, "-", "_")
+	filename = fmt.Sprintf("%s.md", filename)
 
 	return filename
 }
@@ -334,4 +308,8 @@ func saveReportToFile(report, filename string) error {
 
 	_, err = file.WriteString(report)
 	return err
+}
+
+func ensureWorkingFilesDir() error {
+	return os.MkdirAll("working-files", os.ModePerm)
 }

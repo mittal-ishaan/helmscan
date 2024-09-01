@@ -40,7 +40,7 @@ func ScanImage(imageName string) (ScanResult, error) {
 	safeFileName = strings.ReplaceAll(safeFileName, "*", "_")
 	safeFileName = strings.ReplaceAll(safeFileName, "(", "_")
 	safeFileName = strings.ReplaceAll(safeFileName, ")", "_")
-	outputFile := safeFileName + ".json"
+	outputFile := fmt.Sprintf("working-files/%s_trivy_output.json", safeFileName)
 
 	//fmt.Printf("\noutputFile: %s\n\n", outputFile)
 
