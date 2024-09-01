@@ -43,7 +43,7 @@ type ImageComparison struct {
 
 // CompareHelmCharts compares two versions of a Helm chart and returns the comparison results
 func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
-	fmt.Printf("Comparing Helm charts: %s@%s vs %s@%s\n", before.Name, before.Version, after.Name, after.Version)
+	//fmt.Printf("Comparing Helm charts: %s@%s vs %s@%s\n", before.Name, before.Version, after.Name, after.Version)
 
 	beforeImages, err := extractImagesFromChart(before)
 	if err != nil {
@@ -57,7 +57,7 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 
 	fmt.Printf("Extracted images. Before: %d, After: %d\n", len(beforeImages), len(afterImages))
 
-	added, removed, changed, common, changedMap := compareImageLists(beforeImages, afterImages)
+	added, removed, changed, common, changedMap, _, afterMap, repoBeforeMap, repoAfterMap := compareImageLists(beforeImages, afterImages)
 
 	addedReports, err := generateImageReports(added)
 	if err != nil {
@@ -76,10 +76,8 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 
 	// Generate reports for changed images
 	for _, img := range changed {
-		base, _ := splitImageName(img)
-		beforeTag := changedMap[img]
-		beforeImg := fmt.Sprintf("%s:%s", base, beforeTag)
-		afterImg := img
+		beforeImg := fmt.Sprintf("%s/%s:%s", repoBeforeMap[img], img, changedMap[img])
+		afterImg := fmt.Sprintf("%s/%s:%s", repoAfterMap[img], img, afterMap[img])
 		beforeScan, err := imageScan.ScanImage(beforeImg)
 		if err != nil {
 			return ComparisonResult{}, fmt.Errorf("error scanning before image: %w", err)
@@ -88,11 +86,14 @@ func CompareHelmCharts(before, after HelmChart) (ComparisonResult, error) {
 		if err != nil {
 			return ComparisonResult{}, fmt.Errorf("error scanning after image: %w", err)
 		}
+		fmt.Printf("beforeScan: %v\n", beforeScan)
+		fmt.Printf("afterScan: %v\n", afterScan)
 		beforeReport := parseImageScanResult(beforeScan)
 		afterReport := parseImageScanResult(afterScan)
+
 		diff := imageScan.CompareScans(beforeScan, afterScan)
 		changedReports = append(changedReports, ImageComparison{
-			Image:        img,
+			Image:        afterImg,
 			BeforeReport: beforeReport,
 			AfterReport:  afterReport,
 			Diff:         *diff,
@@ -128,10 +129,10 @@ func parseImageScanResult(scanResult imageScan.ScanResult) ImageReport {
 	return ImageReport{
 		Image: scanResult.Image,
 		Vulnerabilities: imageScan.SeverityCounts{
-			Low:      scanResult.Vulnerabilities.Low,
-			Medium:   scanResult.Vulnerabilities.Medium,
-			High:     scanResult.Vulnerabilities.High,
 			Critical: scanResult.Vulnerabilities.Critical,
+			High:     scanResult.Vulnerabilities.High,
+			Medium:   scanResult.Vulnerabilities.Medium,
+			Low:      scanResult.Vulnerabilities.Low,
 		},
 		VulnsByLevel: scanResult.VulnsByLevel,
 	}
@@ -188,7 +189,7 @@ func extractImagesFromChart(chart HelmChart) ([]string, error) {
 		fmt.Printf("Command output:\n%s\n", string(output))
 		return nil, fmt.Errorf("error running helm repo update: %w", err)
 	}
-	fmt.Printf("Helm repo update output:\n%s\n", string(output))
+	//fmt.Printf("Helm repo update output:\n%s\n", string(output))
 
 	// Run helm template
 	cmd = exec.Command("helm", "template", chart.Name, "--version", chart.Version)
@@ -200,7 +201,7 @@ func extractImagesFromChart(chart HelmChart) ([]string, error) {
 		return nil, fmt.Errorf("error running helm template: %w", err)
 	}
 
-	fmt.Printf("Helm command output length: %d bytes\n", len(output))
+	//fmt.Printf("Helm command output length: %d bytes\n", len(output))
 
 	// Write output to a file in the working-files/ directory for debugging
 	filename := fmt.Sprintf("working-files/%s_%s_helm_output.yaml", strings.ReplaceAll(chart.Name, "/", "_"), chart.Version)
@@ -274,52 +275,66 @@ func uniqueStrings(slice []string) []string {
 }
 
 // compareImageLists compares two lists of images and returns added, removed, and common images
-func compareImageLists(before, after []string) (added, removed, changed, common []string, changedMap map[string]string) {
-	beforeMap := make(map[string]string)
-	afterMap := make(map[string]string)
+func compareImageLists(before, after []string) (added, removed, changed, common []string, changedMap, beforeMap, afterMap, repoBeforeMap, repoAfterMap map[string]string) {
+	beforeMap = make(map[string]string)
+	afterMap = make(map[string]string)
 	changedMap = make(map[string]string)
+	repoBeforeMap = make(map[string]string)
+	repoAfterMap = make(map[string]string)
 
 	for _, img := range before {
-		base, tag := splitImageName(img)
+		repository, base, tag := splitImageName(img)
 		beforeMap[base] = tag
+		repoBeforeMap[base] = repository
 	}
 
 	for _, img := range after {
-		base, tag := splitImageName(img)
+		repository, base, tag := splitImageName(img)
 		afterMap[base] = tag
-		if beforeTag, exists := beforeMap[base]; !exists {
-			added = append(added, img)
-		} else if beforeTag != tag {
-			changed = append(changed, img)
-			changedMap[img] = beforeTag
-		} else {
-			common = append(common, img)
-		}
+		repoAfterMap[base] = repository
 	}
 
-	for _, img := range before {
-		base, tag := splitImageName(img)
-		if afterTag, exists := afterMap[base]; !exists {
-			removed = append(removed, img)
-		} else if afterTag != tag {
-			// Ensure the changed image is not added to removed list
-			if _, alreadyChanged := changedMap[fmt.Sprintf("%s:%s", base, afterTag)]; !alreadyChanged {
-				removed = append(removed, img)
-			}
+	for imageName, afterTag := range afterMap {
+		if _, exists := beforeMap[imageName]; !exists {
+			added = append(added, fmt.Sprintf("%s/%s:%s", repoAfterMap[imageName], imageName, afterTag))
+			continue
+		}
+		if beforeTag, exists := beforeMap[imageName]; exists && beforeTag != afterTag {
+			changed = append(changed, fmt.Sprintf("%s/%s:%s", repoAfterMap[imageName], imageName, afterTag))
+			changedMap[imageName] = beforeTag
+		} else {
+			common = append(common, fmt.Sprintf("%s/%s:%s", repoAfterMap[imageName], imageName, afterTag))
+		}
+
+	}
+
+	for imageName, beforeTag := range beforeMap {
+		if _, exists := afterMap[imageName]; !exists {
+			removed = append(removed, fmt.Sprintf("%s/%s:%s", repoBeforeMap[imageName], imageName, beforeTag))
 		}
 	}
 
 	return
 }
 
-func splitImageName(image string) (base, tag string) {
+func splitImageName(image string) (repository, base, tag string) {
+	// Split the image string into repository/image and tag
 	parts := strings.Split(image, ":")
-	base = parts[0]
 	if len(parts) > 1 {
 		tag = parts[1]
 	} else {
 		tag = "latest"
 	}
+
+	// Split the repository/image part into repository and base image
+	repoParts := strings.Split(parts[0], "/")
+	base = repoParts[len(repoParts)-1]
+	if len(repoParts) > 1 {
+		repository = strings.Join(repoParts[:len(repoParts)-1], "/")
+	} else {
+		repository = "docker.io"
+	}
+
 	return
 }
 
@@ -383,11 +398,17 @@ func GenerateHelmComparisonReport(result ComparisonResult) string {
 		report.WriteString(fmt.Sprintf("- %s\n", image.Image))
 	}
 
+	fmt.Printf("\n\n")
+
 	// List all CVEs by severity removed from the right that existed in the left
 	report.WriteString("\n## Removed CVEs by Severity:\n")
 	removedCVEs := make(map[string]map[string][]string)
 	for _, imageComparison := range result.ChangedImages {
+		fmt.Printf("Image: %s\n", imageComparison.Image)
+		fmt.Printf("Diff: %v\n", imageComparison.Diff)
 		for severity, cves := range imageComparison.Diff.RemovedByLevel {
+			fmt.Printf("Severity: %s\n", severity)
+			fmt.Printf("CVEs: %v\n", cves)
 			if _, exists := removedCVEs[severity]; !exists {
 				removedCVEs[severity] = make(map[string][]string)
 			}
@@ -407,6 +428,8 @@ func GenerateHelmComparisonReport(result ComparisonResult) string {
 			}
 		}
 	}
+
+	fmt.Printf("\n\n")
 
 	return report.String()
 }

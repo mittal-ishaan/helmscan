@@ -124,12 +124,12 @@ func isHelmChart(ref string) bool {
 
 func scanSingleImage(imageURL string) {
 	logger.Infof("Scanning image: %s", imageURL)
-	result, err := imageScan.ScanImage(imageURL)
+	_, err := imageScan.ScanImage(imageURL)
 	if err != nil {
 		logger.Errorf("Error scanning image: %v", err)
 		return
 	}
-	fmt.Println(result)
+	//fmt.Println(result)
 }
 
 func scanSingleHelmChart(chartRef string) {
@@ -139,12 +139,12 @@ func scanSingleHelmChart(chartRef string) {
 		logger.Fatalf("Invalid Helm chart reference. Expected format: repo/chart@version")
 	}
 	chart := helmscan.HelmChart{Name: parts[0], Version: parts[1]}
-	result, err := helmscan.CompareHelmCharts(chart, chart)
+	_, err := helmscan.CompareHelmCharts(chart, chart)
 	if err != nil {
 		logger.Errorf("Error scanning Helm chart: %v", err)
 		return
 	}
-	fmt.Println(helmscan.GenerateHelmComparisonReport(result))
+	//fmt.Println(helmscan.GenerateHelmComparisonReport(result))
 }
 
 func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
@@ -169,7 +169,7 @@ func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
 	report := helmscan.GenerateHelmComparisonReport(result)
 
 	// Print the report
-	fmt.Println(report)
+	//fmt.Println(report)
 
 	// Save the report if requested
 	if saveReport {

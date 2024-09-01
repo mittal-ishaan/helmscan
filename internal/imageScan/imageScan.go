@@ -63,6 +63,7 @@ func ScanImage(imageName string) (ScanResult, error) {
 	}
 
 	vulns := extractVulnerabilities(string(jsonData))
+
 	result := ScanResult{
 		Image:           imageName,
 		Vulnerabilities: countVulnerabilities(vulns),
@@ -147,7 +148,6 @@ func extractVulnerabilities(scan string) []Vulnerability {
 		}
 	}
 
-	fmt.Printf("Extracted vulnerabilities:\n%v\n\n", vulns)
 	return vulns
 }
 
