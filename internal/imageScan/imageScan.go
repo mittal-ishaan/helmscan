@@ -21,6 +21,7 @@ type ScanResult struct {
 	Image           string
 	Vulnerabilities SeverityCounts
 	VulnsByLevel    map[string][]string
+	VulnList        []Vulnerability // Add this line
 }
 
 func ScanImage(imageName string) (ScanResult, error) {
