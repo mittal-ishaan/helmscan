@@ -318,7 +318,7 @@ func generateFilename(ref1, ref2 string) string {
 	name2, tag2 := getName(ref2)
 
 	// Create a sanitized filename
-	filename := fmt.Sprintf("working-files/%s-%s_%s-%s", name1, tag1, name2, tag2)
+	filename := fmt.Sprintf("%s-%s_%s-%s", name1, tag1, name2, tag2)
 	filename = sanitizeFilename(filename)
 	filename = fmt.Sprintf("%s.md", filename)
 
@@ -332,7 +332,7 @@ func sanitizeFilename(filename string) string {
 }
 
 func saveReportToFile(content, filename string) error {
-	file, err := os.Create(filename)
+	file, err := os.Create(strings.Join([]string{"working-files", filename}, "/"))
 	if err != nil {
 		return err
 	}

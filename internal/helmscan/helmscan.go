@@ -1,16 +1,17 @@
 package helmscan
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
-	yaml "sigs.k8s.io/yaml" // This line replaces both yaml imports
 )
 
 type HelmComparison struct {
@@ -19,8 +20,8 @@ type HelmComparison struct {
 	AddedImages   map[string][]*ContainerImage
 	RemovedImages map[string][]*ContainerImage
 	ChangedImages map[string][]*ContainerImage
-	RemovedCVEs   map[string][]imageScan.Vulnerability
-	AddedCVEs     map[string][]imageScan.Vulnerability
+	RemovedCVEs   map[string]map[string]imageScan.Vulnerability
+	AddedCVEs     map[string]map[string]imageScan.Vulnerability
 }
 
 type HelmChart struct {
@@ -49,10 +50,15 @@ type ContainerImage struct {
 }
 
 func (ci ContainerImage) String() string {
-	return fmt.Sprintf("Repository: %s, Tag: %s, ImageName: %s", ci.Repository, ci.Tag, ci.ImageName)
+	return fmt.Sprintf("Repository: %s\n, Tag: %s\n, ImageName: %s\n\n", ci.Repository, ci.Tag, ci.ImageName)
 }
 
 func Scan(chartRef string) (HelmChart, error) {
+	// Add this at the beginning of the Scan function
+	if err := os.MkdirAll("working-files", 0755); err != nil {
+		return HelmChart{}, fmt.Errorf("error creating working-files directory: %w", err)
+	}
+
 	// Parse the chart reference
 	repoName, chartName, version, err := parseChartReference(chartRef)
 	if err != nil {
@@ -66,15 +72,18 @@ func Scan(chartRef string) (HelmChart, error) {
 		return HelmChart{}, fmt.Errorf("error templating chart: %w", err)
 	}
 
-	// Parse the templated output
-	var templatedYaml map[string]interface{}
-	err = yaml.Unmarshal(output, &templatedYaml)
+	// Save the output to a file
+	outputFileName := fmt.Sprintf("working-files/%s_%s_%s_helm_output.yaml", repoName, chartName, version)
+	err = os.WriteFile(outputFileName, output, 0644)
 	if err != nil {
-		return HelmChart{}, fmt.Errorf("error parsing templated YAML: %w", err)
+		return HelmChart{}, fmt.Errorf("error saving helm output to file: %w", err)
 	}
 
-	// Extract images
-	images := extractImages(templatedYaml)
+	// Extract images using yq and jq
+	images, err := extractImagesFromYAML(output)
+	if err != nil {
+		return HelmChart{}, fmt.Errorf("error extracting images: %w", err)
+	}
 
 	helmChart := HelmChart{
 		Name:           chartName,
@@ -87,37 +96,16 @@ func Scan(chartRef string) (HelmChart, error) {
 		fmt.Printf("Warning: No images found in chart %s\n", chartRef)
 	} else {
 		fmt.Printf("Found %d images in chart %s:\n", len(images), chartRef)
-		for _, img := range images {
-			fmt.Printf("  - %s\n", img)
-		}
 	}
 
 	var scanErrors []string
-
-	// Scan each image
-	for _, image := range images {
-		fmt.Printf("Debug: Image details - Repository: '%s', ImageName: '%s', Tag: '%s'\n", image.Repository, image.ImageName, image.Tag)
-
-		var fullImageName string
-		if image.Repository != "" {
-			fullImageName = fmt.Sprintf("%s/%s:%s", image.Repository, image.ImageName, image.Tag)
-		} else {
-			fullImageName = fmt.Sprintf("%s:%s", image.ImageName, image.Tag)
-		}
-		fmt.Printf("Debug: Full image name: '%s'\n", fullImageName)
-
-		scanResult, err := imageScan.ScanImage(fullImageName)
+	for _, img := range images {
+		scanResult, err := imageScan.ScanImage(fmt.Sprintf("%s/%s:%s", img.Repository, img.ImageName, img.Tag))
 		if err != nil {
-			scanErrors = append(scanErrors, fmt.Sprintf("error scanning image %s: %v", fullImageName, err))
-			continue
+			scanErrors = append(scanErrors, fmt.Sprintf("error scanning image %s: %v", img.ImageName, err))
+		} else {
+			img.ScanResult = scanResult
 		}
-
-		image.ScanResult = scanResult
-		image.Vulnerabilities = make(map[string]imageScan.Vulnerability)
-		for _, vuln := range scanResult.VulnList {
-			image.Vulnerabilities[vuln.ID] = vuln
-		}
-		fmt.Printf("Image %s has %d vulnerabilities\n", fullImageName, len(image.Vulnerabilities))
 	}
 
 	if len(scanErrors) > 0 {
@@ -134,8 +122,8 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 		AddedImages:   make(map[string][]*ContainerImage),
 		RemovedImages: make(map[string][]*ContainerImage),
 		ChangedImages: make(map[string][]*ContainerImage),
-		RemovedCVEs:   make(map[string][]imageScan.Vulnerability),
-		AddedCVEs:     make(map[string][]imageScan.Vulnerability),
+		RemovedCVEs:   make(map[string]map[string]imageScan.Vulnerability),
+		AddedCVEs:     make(map[string]map[string]imageScan.Vulnerability),
 	}
 
 	beforeImages := make(map[string]*ContainerImage)
@@ -156,18 +144,26 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 				compareImageVulnerabilities(beforeImg, afterImg, &comparison)
 			}
 		} else {
-			comparison.RemovedImages[name] = []*ContainerImage{beforeImg}
-			for _, vuln := range beforeImg.Vulnerabilities {
-				comparison.RemovedCVEs[name] = append(comparison.RemovedCVEs[name], vuln)
+			for ID, vuln := range beforeImg.Vulnerabilities {
+				if _, exists := comparison.RemovedCVEs[ID]; !exists {
+					comparison.RemovedCVEs[ID] = make(map[string]imageScan.Vulnerability)
+					comparison.RemovedCVEs[ID][name] = vuln
+				} else {
+					comparison.RemovedCVEs[ID][name] = vuln
+				}
 			}
 		}
 	}
 
 	for name, afterImg := range afterImages {
 		if _, exists := beforeImages[name]; !exists {
-			comparison.AddedImages[name] = []*ContainerImage{afterImg}
-			for _, vuln := range afterImg.Vulnerabilities {
-				comparison.AddedCVEs[name] = append(comparison.AddedCVEs[name], vuln)
+			for ID, vuln := range afterImg.Vulnerabilities {
+				if _, exists := comparison.AddedCVEs[ID]; !exists {
+					comparison.AddedCVEs[ID] = make(map[string]imageScan.Vulnerability)
+					comparison.AddedCVEs[ID][name] = vuln
+				} else {
+					comparison.AddedCVEs[ID][name] = vuln
+				}
 			}
 		}
 	}
@@ -178,35 +174,47 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 func compareImageVulnerabilities(before, after *ContainerImage, comparison *HelmComparison) {
 	for id, vuln := range before.Vulnerabilities {
 		if _, exists := after.Vulnerabilities[id]; !exists {
-			comparison.RemovedCVEs[before.ImageName] = append(comparison.RemovedCVEs[before.ImageName], vuln)
+			if _, exists := comparison.RemovedCVEs[id]; !exists {
+				comparison.RemovedCVEs[id] = make(map[string]imageScan.Vulnerability)
+				comparison.RemovedCVEs[id][before.ImageName] = vuln
+			} else {
+				comparison.RemovedCVEs[id][before.ImageName] = vuln
+			}
 		}
 	}
 
 	for id, vuln := range after.Vulnerabilities {
 		if _, exists := before.Vulnerabilities[id]; !exists {
-			comparison.AddedCVEs[after.ImageName] = append(comparison.AddedCVEs[after.ImageName], vuln)
+			if _, exists := comparison.AddedCVEs[id]; !exists {
+				comparison.AddedCVEs[id] = make(map[string]imageScan.Vulnerability)
+				comparison.AddedCVEs[id][after.ImageName] = vuln
+			} else {
+				comparison.AddedCVEs[id][after.ImageName] = vuln
+			}
 		}
 	}
 }
 
-func extractImages(data interface{}) []*ContainerImage {
-	var images []*ContainerImage
-
-	switch v := data.(type) {
-	case map[string]interface{}:
-		if img, ok := v["image"].(string); ok {
-			images = append(images, parseImageString(img))
-		}
-		for _, value := range v {
-			images = append(images, extractImages(value)...)
-		}
-	case []interface{}:
-		for _, item := range v {
-			images = append(images, extractImages(item)...)
-		}
+func extractImagesFromYAML(yamlData []byte) ([]*ContainerImage, error) {
+	// Use yq to convert YAML to JSON, then use jq to extract image values
+	cmd := exec.Command("bash", "-c", `yq e -o json - | jq -r '.. | .image? | select(.)'`)
+	cmd.Stdin = bytes.NewReader(yamlData)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error extracting images: %w", err)
 	}
 
-	return images
+	// Split the output into lines
+	imageStrings := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+	// Create ContainerImage objects
+	var images []*ContainerImage
+	for _, imageString := range imageStrings {
+		image := parseImageString(imageString)
+		images = append(images, image)
+	}
+
+	return images, nil
 }
 
 func parseImageString(imageString string) *ContainerImage {
@@ -214,19 +222,20 @@ func parseImageString(imageString string) *ContainerImage {
 	var repository, imageName, tag string
 
 	if len(parts) > 1 {
-		tag = strings.Join(parts[1:], ":") // Join all parts after the first colon
-		imageNameParts := strings.Split(parts[0], "/")
-		if len(imageNameParts) > 1 {
-			repository = strings.Join(imageNameParts[:len(imageNameParts)-1], "/")
-			imageName = imageNameParts[len(imageNameParts)-1]
+		tag = parts[len(parts)-1]
+		repoAndImage := strings.Join(parts[:len(parts)-1], ":")
+		repoParts := strings.Split(repoAndImage, "/")
+		if len(repoParts) > 1 {
+			imageName = repoParts[len(repoParts)-1]
+			repository = strings.Join(repoParts[:len(repoParts)-1], "/")
 		} else {
-			imageName = parts[0]
+			imageName = repoAndImage
 		}
 	} else {
-		imageNameParts := strings.Split(imageString, "/")
-		if len(imageNameParts) > 1 {
-			repository = strings.Join(imageNameParts[:len(imageNameParts)-1], "/")
-			imageName = imageNameParts[len(imageNameParts)-1]
+		repoParts := strings.Split(imageString, "/")
+		if len(repoParts) > 1 {
+			imageName = repoParts[len(repoParts)-1]
+			repository = strings.Join(repoParts[:len(repoParts)-1], "/")
 		} else {
 			imageName = imageString
 		}
@@ -275,4 +284,86 @@ func downloadChart(repoName, chartName, version, destDir string) (string, error)
 	}
 
 	return chartPath, nil
+}
+
+func GenerateReport(comparison HelmComparison) string {
+	var sb strings.Builder
+
+	sb.WriteString("# Helm Chart Comparison Report\n\n")
+
+	// Images table
+	sb.WriteString("## Images\n\n")
+	sb.WriteString("| Image Name | Status | Before Repo | After Repo | Before Tag | After Tag |\n")
+	sb.WriteString("|------------|--------|-------------|------------|------------|-----------|\n")
+
+	var imageRows []string
+
+	for name, images := range comparison.AddedImages {
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Added | - | %s | - | %s |", name, images[0].Repository, images[0].Tag))
+	}
+
+	for name, images := range comparison.RemovedImages {
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Removed | %s | - | %s | - |", name, images[0].Repository, images[0].Tag))
+	}
+
+	for name, images := range comparison.ChangedImages {
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Changed | %s | %s | %s | %s |", name, images[0].Repository, images[1].Repository, images[0].Tag, images[1].Tag))
+	}
+
+	sort.Strings(imageRows)
+	sb.WriteString(strings.Join(imageRows, "\n"))
+	sb.WriteString("\n\n")
+
+	// Added CVEs table
+	sb.WriteString("## Added CVEs\n\n")
+	sb.WriteString("| CVE ID | Severity | Affected Images |\n")
+	sb.WriteString("|--------|----------|------------------|\n")
+
+	addedCVERows := generateCVERows(comparison.AddedCVEs)
+	sb.WriteString(strings.Join(addedCVERows, "\n"))
+	sb.WriteString("\n\n")
+
+	// Removed CVEs table
+	sb.WriteString("## Removed CVEs\n\n")
+	sb.WriteString("| CVE ID | Severity | Affected Images |\n")
+	sb.WriteString("|--------|----------|------------------|\n")
+
+	removedCVERows := generateCVERows(comparison.RemovedCVEs)
+	sb.WriteString(strings.Join(removedCVERows, "\n"))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+func generateCVERows(cves map[string]map[string]imageScan.Vulnerability) []string {
+	var rows []string
+	for cveID, imageVulns := range cves {
+		var affectedImages []string
+		var severity string
+
+		for imageName, vuln := range imageVulns {
+			affectedImages = append(affectedImages, imageName)
+			severity = vuln.Severity // Assuming all instances of a CVE have the same severity
+		}
+
+		// Sort affected images for consistent output
+		sort.Strings(affectedImages)
+
+		// Join affected images with commas
+		imagesStr := strings.Join(affectedImages, ", ")
+
+		// Create the table row
+		row := fmt.Sprintf("| %s | %s | %s |", cveID, severity, imagesStr)
+		rows = append(rows, row)
+	}
+
+	// Sort rows by CVE ID for consistent output
+	sort.Strings(rows)
+
+	return rows
+}
+
+// Add this function to save the report to a file
+func SaveReportToFile(report string, filename string) error {
+	return os.WriteFile(filename, []byte(report), 0644)
 }

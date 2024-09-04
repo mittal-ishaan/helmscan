@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -167,14 +168,18 @@ func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
 		return
 	}
 
-	// For now, just log the scanned charts
-	logger.Infof("Scanned chart 1:\n%s", scannedChart1)
-	logger.Infof("Scanned chart 2:\n%s", scannedChart2)
+	comparison := helmscan.CompareHelmCharts(scannedChart1, scannedChart2)
+	report := helmscan.GenerateReport(comparison)
 
-	// TODO: Implement comparison logic using scannedChart1 and scannedChart2
+	// Print to console
+	fmt.Println(report)
 
-	// The rest of the function (report generation, saving, etc.) remains unchanged
-	// ...
+	// Save to file
+	err = helmscan.SaveReportToFile(report, "working-files/helm_comparison_report.md")
+	if err != nil {
+		log.Fatalf("Error saving report: %v", err)
+	}
+
 }
 
 func compareImages(imageURL1, imageURL2 string, saveReport bool) {
