@@ -20,6 +20,29 @@ type ScanResult struct {
 	VulnList        []Vulnerability
 }
 
+type VulnerabilityReport struct {
+	Image1Name      string
+	Image2Name      string
+	TotalCVEsImage1 SeverityCounts
+	TotalCVEsImage2 SeverityCounts
+	RemovedCVEs     SeverityCounts
+	AddedCVEs       SeverityCounts
+	RemovedByLevel  map[string][]string
+	AddedByLevel    map[string][]string
+}
+
+type Vulnerability struct {
+	ID       string
+	Severity string
+}
+
+type SeverityCounts struct {
+	Low      int
+	Medium   int
+	High     int
+	Critical int
+}
+
 func ScanImage(imageName string) (ScanResult, error) {
 	if strings.Contains(imageName, "alpine") {
 		return ScanResult{}, nil
@@ -101,22 +124,6 @@ func CompareScans(firstScan, secondScan ScanResult) *VulnerabilityReport {
 	return report
 }
 
-type VulnerabilityReport struct {
-	Image1Name      string
-	Image2Name      string
-	TotalCVEsImage1 SeverityCounts
-	TotalCVEsImage2 SeverityCounts
-	RemovedCVEs     SeverityCounts
-	AddedCVEs       SeverityCounts
-	RemovedByLevel  map[string][]string
-	AddedByLevel    map[string][]string
-}
-
-type Vulnerability struct {
-	ID       string
-	Severity string
-}
-
 func extractVulnerabilities(scan string) []Vulnerability {
 	var result struct {
 		Results []struct {
@@ -144,15 +151,6 @@ func extractVulnerabilities(scan string) []Vulnerability {
 	}
 
 	return vulns
-}
-
-func containsVulnerability(vulns []Vulnerability, vuln Vulnerability) bool {
-	for _, v := range vulns {
-		if v.ID == vuln.ID {
-			return true
-		}
-	}
-	return false
 }
 
 func incrementSeverityCount(counts *SeverityCounts, severity string) {
@@ -201,13 +199,6 @@ func CheckTrivyInstallation() error {
 	fmt.Printf("Trivy version %s is installed.\n", version)
 
 	return nil
-}
-
-type SeverityCounts struct {
-	Low      int
-	Medium   int
-	High     int
-	Critical int
 }
 
 func calculateDifference(before, after map[string][]string) (SeverityCounts, map[string][]string) {

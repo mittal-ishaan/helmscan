@@ -101,7 +101,8 @@ func Scan(chartRef string) (HelmChart, error) {
 
 	var scanErrors []string
 	for id, img := range images {
-		scanResult, err := imageScan.ScanImage(fmt.Sprintf("%s/%s:%s", img.Repository, img.ImageName, img.Tag))
+		imageName := fmt.Sprintf("%s/%s:%s", img.Repository, img.ImageName, img.Tag)
+		scanResult, err := imageScan.ScanImage(imageName)
 		if err != nil {
 			scanErrors = append(scanErrors, fmt.Sprintf("error scanning image %s: %v", img.ImageName, err))
 		} else {
@@ -319,21 +320,33 @@ func GenerateReport(comparison HelmComparison) string {
 
 	// CVE by Severity
 	sb.WriteString("### CVE by Severity\n\n")
-	sb.WriteString("| Severity | Count |\n")
-	sb.WriteString("|----------|-------|\n")
+	sb.WriteString("| Severity | Count | Prev Count | Difference |\n")
+	sb.WriteString("|----------|-------|------------|------------|\n")
 
-	cveSeverityCount := make(map[string]int)
+	severities := []string{"critical", "high", "medium", "low"}
+	prevCounts := make(map[string]int)
+	currentCounts := make(map[string]int)
+
+	// Count vulnerabilities for both images
+	for _, img := range comparison.Before.ContainsImages {
+		for _, vuln := range img.Vulnerabilities {
+			prevCounts[vuln.Severity]++
+		}
+	}
 	for _, img := range comparison.After.ContainsImages {
 		for _, vuln := range img.Vulnerabilities {
-			if _, exists := cveSeverityCount[vuln.Severity]; !exists {
-				cveSeverityCount[vuln.Severity] = 0
-			}
-			cveSeverityCount[vuln.Severity]++
+			currentCounts[vuln.Severity]++
 		}
 	}
 
-	for severity, count := range cveSeverityCount {
-		sb.WriteString(fmt.Sprintf("| %s | %d |\n", severity, count))
+	// Generate table rows
+	for _, severity := range severities {
+		count := currentCounts[severity]
+		prevCount := prevCounts[severity]
+		difference := count - prevCount
+		differenceStr := fmt.Sprintf("%+d", difference) // Use %+d to always show the sign
+
+		sb.WriteString(fmt.Sprintf("| %s | %d | %d | %s |\n", severity, count, prevCount, differenceStr))
 	}
 	sb.WriteString("\n\n")
 
