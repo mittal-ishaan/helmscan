@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/helmscan"
@@ -185,9 +184,6 @@ func compareImages(imageURL1, imageURL2 string, saveReport bool) {
 		fmt.Print("Enter the second image URL: ")
 		imageURL2 = getUserInput()
 	}
-	var sb strings.Builder
-	sb.WriteString("## Vulnerability Comparison Report\n")
-	sb.WriteString(fmt.Sprintf("### Comparing images: %s and %s\n", imageURL1, imageURL2))
 
 	// Scan both images
 	scan1, err := imageScan.ScanImage(imageURL1)
@@ -204,106 +200,14 @@ func compareImages(imageURL1, imageURL2 string, saveReport bool) {
 
 	// Compare the scans
 	report := imageScan.CompareScans(scan1, scan2)
-
-	// Image 1 summary
-	sb.WriteString(fmt.Sprintf("#### Image 1: %s\n", report.Image1Name))
-	sb.WriteString(fmt.Sprintf("#### Total vulnerabilities: %d\n\n",
-		report.TotalCVEsImage1.Critical+report.TotalCVEsImage1.High+
-			report.TotalCVEsImage1.Medium+report.TotalCVEsImage1.Low))
-	sb.WriteString(formatVulnerabilityCountsTable(report.TotalCVEsImage1))
-	sb.WriteString("\n")
-
-	// Image 2 summary
-	sb.WriteString(fmt.Sprintf("#### Image 2: %s\n", report.Image2Name))
-	sb.WriteString(fmt.Sprintf("#### Total vulnerabilities: %d\n\n",
-		report.TotalCVEsImage2.Critical+report.TotalCVEsImage2.High+
-			report.TotalCVEsImage2.Medium+report.TotalCVEsImage2.Low))
-	sb.WriteString(formatVulnerabilityCountsTable(report.TotalCVEsImage2))
-	sb.WriteString("\n")
-
-	// Generate and print the report for added vulnerabilities
-	sb.WriteString("### Added vulnerabilities:\n")
-	sb.WriteString(printVulnerabilityReport(report.AddedByLevel))
-
-	// Generate and print the report for removed vulnerabilities
-	sb.WriteString("### Removed vulnerabilities:\n")
-	sb.WriteString(printVulnerabilityReport(report.RemovedByLevel))
-
-	if saveReport {
-		filename := generateFilename(imageURL1, imageURL2)
-		err := saveReportToFile(sb.String(), filename)
-		if err != nil {
-			logger.Errorf("Error saving report to file: %v", err)
-		}
-	}
-
-	fmt.Println(sb.String())
-}
-
-func formatVulnerabilityCountsTable(counts imageScan.SeverityCounts) string {
-	return fmt.Sprintf(`| Severity | Count |
-|----------|-------|
-| Critical | %d    |
-| High     | %d    |
-| Medium   | %d    |
-| Low      | %d    |
-`, counts.Critical, counts.High, counts.Medium, counts.Low)
-}
-
-func generateFilename(ref1, ref2 string) string {
-	// Extract image names and tags
-	getName := func(ref string) (string, string) {
-		parts := strings.Split(ref, ":")
-		name := strings.Split(parts[0], "/")
-		tag := "latest"
-		if len(parts) > 1 {
-			tag = parts[1]
-		}
-		return name[len(name)-1], tag
-	}
-
-	name1, tag1 := getName(ref1)
-	name2, tag2 := getName(ref2)
-
-	// Create a sanitized filename
-	filename := fmt.Sprintf("%s-%s_%s-%s", name1, tag1, name2, tag2)
-	filename = sanitizeFilename(filename)
-	filename = fmt.Sprintf("%s.md", filename)
-
-	return filename
-}
-
-func sanitizeFilename(filename string) string {
-	// Replace any character that isn't alphanumeric, underscore, or hyphen with an underscore
-	reg := regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
-	return reg.ReplaceAllString(filename, "_")
-}
-
-func saveReportToFile(content, filename string) error {
-	file, err := os.Create(filename)
+	err = imageScan.PrintComparisonReport(report, saveReport)
 	if err != nil {
-		return err
+		logger.Errorf("Error printing comparison report: %v", err)
+		return
 	}
-	defer file.Close()
 
-	_, err = file.WriteString(content)
-	return err
 }
 
 func ensureWorkingFilesDir() error {
 	return os.MkdirAll("working-files", os.ModePerm)
-}
-
-func printVulnerabilityReport(vulnerabilities map[string][]string) string {
-	var sb strings.Builder
-	for severity, vulnIDs := range vulnerabilities {
-		sb.WriteString(fmt.Sprintf("#### %s\n", severity))
-		sb.WriteString("| VulnerabilityID |\n")
-		sb.WriteString("| --------------- |\n")
-		for _, id := range vulnIDs {
-			sb.WriteString(fmt.Sprintf("| %s |\n", id))
-		}
-		sb.WriteString("\n")
-	}
-	return sb.String()
 }

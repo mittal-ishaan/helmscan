@@ -3,14 +3,10 @@ package imageScan
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
-)
-
-const (
-	trivyInstallURL = "https://aquasecurity.github.io/trivy/v0.54/getting-started/installation/"
 )
 
 type GitHubRelease struct {
@@ -21,32 +17,17 @@ type ScanResult struct {
 	Image           string
 	Vulnerabilities SeverityCounts
 	VulnsByLevel    map[string][]string
-	VulnList        []Vulnerability // Add this line
+	VulnList        []Vulnerability
 }
 
 func ScanImage(imageName string) (ScanResult, error) {
 	if strings.Contains(imageName, "alpine") {
 		return ScanResult{}, nil
 	}
-	// Create a safe filename from the image name
-	safeFileName := strings.ReplaceAll(imageName, "/", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, ":", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "-", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, ".", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, " ", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "!", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "@", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "#", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "$", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "%", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "^", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "&", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "*", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, "(", "_")
-	safeFileName = strings.ReplaceAll(safeFileName, ")", "_")
-	outputFile := fmt.Sprintf("working-files/%s_trivy_output.json", safeFileName)
 
-	//fmt.Printf("\noutputFile: %s\n\n", outputFile)
+	// Create a safe filename from the image name
+	safeFileName := createSafeFileName(imageName)
+	outputFile := fmt.Sprintf("working-files/%s_trivy_output.json", safeFileName)
 
 	cmd := exec.Command("trivy", "image",
 		"-f", "json",
@@ -72,9 +53,19 @@ func ScanImage(imageName string) (ScanResult, error) {
 		Image:           imageName,
 		Vulnerabilities: countVulnerabilities(vulns),
 		VulnsByLevel:    groupVulnerabilitiesByLevel(vulns),
+		VulnList:        vulns,
 	}
 
 	return result, nil
+}
+
+func createSafeFileName(imageName string) string {
+	unsafe := []string{"/", ":", "-", ".", " ", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")"}
+	safeFileName := imageName
+	for _, char := range unsafe {
+		safeFileName = strings.ReplaceAll(safeFileName, char, "_")
+	}
+	return safeFileName
 }
 
 func countVulnerabilities(vulns []Vulnerability) SeverityCounts {
@@ -196,13 +187,7 @@ func CheckTrivyInstallation() error {
 	// Check if Trivy is installed
 	_, err := exec.LookPath("trivy")
 	if err != nil {
-		return fmt.Errorf("Trivy is not installed. Please install Trivy from: %s", trivyInstallURL)
-	}
-
-	// Get the latest Trivy version from GitHub
-	latestVersion, err := getLatestTrivyVersion()
-	if err != nil {
-		return fmt.Errorf("Failed to get latest Trivy version: %v", err)
+		return fmt.Errorf("Trivy is not installed. Please install Trivy and ensure it's in your PATH")
 	}
 
 	// Check Trivy version
@@ -213,49 +198,9 @@ func CheckTrivyInstallation() error {
 	}
 
 	version := strings.TrimSpace(strings.TrimPrefix(string(output), "Version: "))
-	if compareVersions(version, latestVersion) < 0 {
-		return fmt.Errorf("Trivy version %s is outdated. Please update to version %s or later from: %s", version, latestVersion, trivyInstallURL)
-	}
+	fmt.Printf("Trivy version %s is installed.\n", version)
 
 	return nil
-}
-
-func getLatestTrivyVersion() (string, error) {
-	resp, err := http.Get("https://api.github.com/repos/aquasecurity/trivy/releases/latest")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", err
-	}
-
-	return strings.TrimPrefix(release.TagName, "v"), nil
-}
-
-func compareVersions(v1, v2 string) int {
-	v1Parts := strings.Split(v1, ".")
-	v2Parts := strings.Split(v2, ".")
-
-	for i := 0; i < len(v1Parts) && i < len(v2Parts); i++ {
-		if v1Parts[i] > v2Parts[i] {
-			return 1
-		}
-		if v1Parts[i] < v2Parts[i] {
-			return -1
-		}
-	}
-
-	if len(v1Parts) > len(v2Parts) {
-		return 1
-	}
-	if len(v1Parts) < len(v2Parts) {
-		return -1
-	}
-
-	return 0
 }
 
 type SeverityCounts struct {
@@ -288,4 +233,111 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func PrintComparisonReport(report *VulnerabilityReport, saveReport bool) error {
+	// Create a report
+	var sb strings.Builder
+	sb.WriteString("## Vulnerability Comparison Report\n")
+	sb.WriteString(fmt.Sprintf("### Comparing images: %s and %s\n", report.Image1Name, report.Image2Name))
+
+	// Image 1 summary
+	sb.WriteString(fmt.Sprintf("#### Image 1: %s\n", report.Image1Name))
+	sb.WriteString(fmt.Sprintf("#### Total vulnerabilities: %d\n\n",
+		report.TotalCVEsImage1.Critical+report.TotalCVEsImage1.High+
+			report.TotalCVEsImage1.Medium+report.TotalCVEsImage1.Low))
+	sb.WriteString(formatVulnerabilityCountsTable(report.TotalCVEsImage1))
+	sb.WriteString("\n")
+
+	// Image 2 summary
+	sb.WriteString(fmt.Sprintf("#### Image 2: %s\n", report.Image2Name))
+	sb.WriteString(fmt.Sprintf("#### Total vulnerabilities: %d\n\n",
+		report.TotalCVEsImage2.Critical+report.TotalCVEsImage2.High+
+			report.TotalCVEsImage2.Medium+report.TotalCVEsImage2.Low))
+	sb.WriteString(formatVulnerabilityCountsTable(report.TotalCVEsImage2))
+	sb.WriteString("\n")
+
+	// Generate and print the report for added vulnerabilities
+	sb.WriteString("### Added vulnerabilities:\n")
+	sb.WriteString(printVulnerabilityReport(report.AddedByLevel))
+
+	// Generate and print the report for removed vulnerabilities
+	sb.WriteString("### Removed vulnerabilities:\n")
+	sb.WriteString(printVulnerabilityReport(report.RemovedByLevel))
+
+	if saveReport {
+		filename := generateFilename(report.Image1Name, report.Image2Name)
+		err := saveReportToFile(sb.String(), filename)
+		if err != nil {
+			errReturn := fmt.Errorf("error saving report to file: %v", err)
+			return errReturn
+		}
+	}
+
+	fmt.Println(sb.String())
+	return nil
+}
+
+func formatVulnerabilityCountsTable(counts SeverityCounts) string {
+	return fmt.Sprintf(`| Severity | Count |
+|----------|-------|
+| Critical | %d    |
+| High     | %d    |
+| Medium   | %d    |
+| Low      | %d    |
+`, counts.Critical, counts.High, counts.Medium, counts.Low)
+}
+
+func printVulnerabilityReport(vulnerabilities map[string][]string) string {
+	var sb strings.Builder
+	for severity, vulnIDs := range vulnerabilities {
+		sb.WriteString(fmt.Sprintf("#### %s\n", severity))
+		sb.WriteString("| VulnerabilityID |\n")
+		sb.WriteString("| --------------- |\n")
+		for _, id := range vulnIDs {
+			sb.WriteString(fmt.Sprintf("| %s |\n", id))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func generateFilename(ref1, ref2 string) string {
+	// Extract image names and tags
+	getName := func(ref string) (string, string) {
+		parts := strings.Split(ref, ":")
+		name := strings.Split(parts[0], "/")
+		tag := "latest"
+		if len(parts) > 1 {
+			tag = parts[1]
+		}
+		return name[len(name)-1], tag
+	}
+
+	name1, tag1 := getName(ref1)
+	name2, tag2 := getName(ref2)
+
+	// Create a sanitized filename
+	filename := fmt.Sprintf("working-files/%s-%s_%s-%s", name1, tag1, name2, tag2)
+	filename = sanitizeFilename(filename)
+	filename = fmt.Sprintf("%s.md", filename)
+
+	return filename
+}
+
+func sanitizeFilename(filename string) string {
+	// Replace any character that isn't alphanumeric, underscore, or hyphen with an underscore
+	reg := regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+	return reg.ReplaceAllString(filename, "_")
+}
+
+func saveReportToFile(content, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(content)
+	return err
 }

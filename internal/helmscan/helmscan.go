@@ -3,12 +3,12 @@ package helmscan
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
 	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	yaml "sigs.k8s.io/yaml" // This line replaces both yaml imports
 )
@@ -59,53 +59,29 @@ func Scan(chartRef string) (HelmChart, error) {
 		return HelmChart{}, err
 	}
 
-	// Create a temporary directory to store the downloaded chart
-	tempDir, err := os.MkdirTemp("", "helm-chart-*")
+	// Use local Helm to template the chart
+	cmd := exec.Command("helm", "template", fmt.Sprintf("%s/%s", repoName, chartName), "--version", version)
+	output, err := cmd.Output()
 	if err != nil {
-		return HelmChart{}, fmt.Errorf("error creating temp directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Download the chart
-	chartPath, err := downloadChart(repoName, chartName, version, tempDir)
-	if err != nil {
-		return HelmChart{}, fmt.Errorf("error downloading chart: %w", err)
-	}
-
-	// Load the chart
-	loadedChart, err := loader.Load(chartPath)
-	if err != nil {
-		return HelmChart{}, fmt.Errorf("error loading chart: %w", err)
-	}
-
-	helmChart := HelmChart{
-		Name:     loadedChart.Metadata.Name,
-		Version:  loadedChart.Metadata.Version,
-		HelmRepo: repoName,
-	}
-
-	// Template the chart
-	client := action.NewInstall(&action.Configuration{})
-	client.DryRun = true
-	client.ReleaseName = "release-name"
-	client.Replace = true
-	client.ClientOnly = true
-	client.IncludeCRDs = false
-
-	release, err := client.Run(loadedChart, nil)
-	if err != nil {
-		return helmChart, fmt.Errorf("error templating chart: %w", err)
+		return HelmChart{}, fmt.Errorf("error templating chart: %w", err)
 	}
 
 	// Parse the templated output
 	var templatedYaml map[string]interface{}
-	err = yaml.Unmarshal([]byte(release.Manifest), &templatedYaml)
+	err = yaml.Unmarshal(output, &templatedYaml)
 	if err != nil {
-		return helmChart, fmt.Errorf("error parsing templated YAML: %w", err)
+		return HelmChart{}, fmt.Errorf("error parsing templated YAML: %w", err)
 	}
 
 	// Extract images
 	images := extractImages(templatedYaml)
+
+	helmChart := HelmChart{
+		Name:           chartName,
+		Version:        version,
+		HelmRepo:       repoName,
+		ContainsImages: images,
+	}
 
 	if len(images) == 0 {
 		fmt.Printf("Warning: No images found in chart %s\n", chartRef)
@@ -115,8 +91,6 @@ func Scan(chartRef string) (HelmChart, error) {
 			fmt.Printf("  - %s\n", img)
 		}
 	}
-
-	helmChart.ContainsImages = images
 
 	var scanErrors []string
 
@@ -151,6 +125,68 @@ func Scan(chartRef string) (HelmChart, error) {
 	}
 
 	return helmChart, nil
+}
+
+func CompareHelmCharts(before, after HelmChart) HelmComparison {
+	comparison := HelmComparison{
+		Before:        before,
+		After:         after,
+		AddedImages:   make(map[string][]*ContainerImage),
+		RemovedImages: make(map[string][]*ContainerImage),
+		ChangedImages: make(map[string][]*ContainerImage),
+		RemovedCVEs:   make(map[string][]imageScan.Vulnerability),
+		AddedCVEs:     make(map[string][]imageScan.Vulnerability),
+	}
+
+	beforeImages := make(map[string]*ContainerImage)
+	afterImages := make(map[string]*ContainerImage)
+
+	for _, img := range before.ContainsImages {
+		beforeImages[img.ImageName] = img
+	}
+
+	for _, img := range after.ContainsImages {
+		afterImages[img.ImageName] = img
+	}
+
+	for name, beforeImg := range beforeImages {
+		if afterImg, exists := afterImages[name]; exists {
+			if beforeImg.Tag != afterImg.Tag {
+				comparison.ChangedImages[name] = []*ContainerImage{beforeImg, afterImg}
+				compareImageVulnerabilities(beforeImg, afterImg, &comparison)
+			}
+		} else {
+			comparison.RemovedImages[name] = []*ContainerImage{beforeImg}
+			for _, vuln := range beforeImg.Vulnerabilities {
+				comparison.RemovedCVEs[name] = append(comparison.RemovedCVEs[name], vuln)
+			}
+		}
+	}
+
+	for name, afterImg := range afterImages {
+		if _, exists := beforeImages[name]; !exists {
+			comparison.AddedImages[name] = []*ContainerImage{afterImg}
+			for _, vuln := range afterImg.Vulnerabilities {
+				comparison.AddedCVEs[name] = append(comparison.AddedCVEs[name], vuln)
+			}
+		}
+	}
+
+	return comparison
+}
+
+func compareImageVulnerabilities(before, after *ContainerImage, comparison *HelmComparison) {
+	for id, vuln := range before.Vulnerabilities {
+		if _, exists := after.Vulnerabilities[id]; !exists {
+			comparison.RemovedCVEs[before.ImageName] = append(comparison.RemovedCVEs[before.ImageName], vuln)
+		}
+	}
+
+	for id, vuln := range after.Vulnerabilities {
+		if _, exists := before.Vulnerabilities[id]; !exists {
+			comparison.AddedCVEs[after.ImageName] = append(comparison.AddedCVEs[after.ImageName], vuln)
+		}
+	}
 }
 
 func extractImages(data interface{}) []*ContainerImage {
