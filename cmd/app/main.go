@@ -172,7 +172,7 @@ func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
 	report := helmscan.GenerateReport(comparison)
 
 	// Print to console
-	fmt.Println(report)
+	//fmt.Println(report)
 
 	// Save to file
 	err = helmscan.SaveReportToFile(report, "working-files/helm_comparison_report.md")
