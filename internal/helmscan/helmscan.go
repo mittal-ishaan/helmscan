@@ -378,60 +378,86 @@ func GenerateReport(comparison HelmComparison) string {
 
 	// Unchanged CVEs table
 	sb.WriteString("### Unchanged CVEs\n\n")
-	sb.WriteString("| CVE ID | Severity | Affected Images |\n")
-	sb.WriteString("|--------|----------|------------------|\n")
-
-	unchangedCVERows := generateCVERows(comparison.UnchangedCVEs)
-	sb.WriteString(strings.Join(unchangedCVERows, "\n"))
+	sb.WriteString(sortAndFormatCVEs(comparison.UnchangedCVEs))
 	sb.WriteString("\n\n")
 
 	// Added CVEs table
 	sb.WriteString("### Added CVEs\n\n")
-	sb.WriteString("| CVE ID | Severity | Affected Images |\n")
-	sb.WriteString("|--------|----------|------------------|\n")
-
-	addedCVERows := generateCVERows(comparison.AddedCVEs)
-	sb.WriteString(strings.Join(addedCVERows, "\n"))
+	sb.WriteString(sortAndFormatCVEs(comparison.AddedCVEs))
 	sb.WriteString("\n\n")
 
 	// Removed CVEs table
 	sb.WriteString("### Removed CVEs\n\n")
-	sb.WriteString("| CVE ID | Severity | Affected Images |\n")
-	sb.WriteString("|--------|----------|------------------|\n")
-
-	removedCVERows := generateCVERows(comparison.RemovedCVEs)
-	sb.WriteString(strings.Join(removedCVERows, "\n"))
+	sb.WriteString(sortAndFormatCVEs(comparison.RemovedCVEs))
 	sb.WriteString("\n")
 
 	return sb.String()
 }
 
-func generateCVERows(cves map[string]map[string]imageScan.Vulnerability) []string {
-	var rows []string
+func severityValue(severity string) int {
+	switch strings.ToLower(severity) {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+type sortableCVE struct {
+	ID       string
+	Severity string
+	Images   []string
+}
+
+type sortableCVEList []sortableCVE
+
+func (s sortableCVEList) Len() int      { return len(s) }
+func (s sortableCVEList) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s sortableCVEList) Less(i, j int) bool {
+	if severityValue(s[i].Severity) == severityValue(s[j].Severity) {
+		return s[i].ID < s[j].ID // Sort by ID if severity is the same
+	}
+	return severityValue(s[i].Severity) > severityValue(s[j].Severity)
+}
+
+func sortAndFormatCVEs(cves map[string]map[string]imageScan.Vulnerability) string {
+	var sortedCVEs sortableCVEList
 	for cveID, imageVulns := range cves {
-		var affectedImages []string
+		var images []string
 		var severity string
-
 		for imageName, vuln := range imageVulns {
-			affectedImages = append(affectedImages, imageName)
-			severity = vuln.Severity // Assuming all instances of a CVE have the same severity
+			images = append(images, imageName)
+			severity = vuln.Severity
 		}
-
-		// Sort affected images for consistent output
-		sort.Strings(affectedImages)
-
-		// Join affected images with commas
-		imagesStr := strings.Join(affectedImages, ", ")
-
-		// Create the table row
-		row := fmt.Sprintf("| %s | %s | %s |", cveID, severity, imagesStr)
-		rows = append(rows, row)
+		sortedCVEs = append(sortedCVEs, sortableCVE{ID: cveID, Severity: severity, Images: images})
 	}
 
-	// Sort rows by CVE ID for consistent output
-	sort.Strings(rows)
+	sort.Sort(sortedCVEs)
 
-	return rows
+	var sb strings.Builder
+	sb.WriteString("| CVE ID | Severity | Affected Images |\n")
+	sb.WriteString("|--------|----------|------------------|\n")
+
+	currentSeverity := ""
+	for _, cve := range sortedCVEs {
+		if cve.Severity != currentSeverity {
+			if currentSeverity != "" {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(fmt.Sprintf("#### %s\n", strings.Title(cve.Severity)))
+			sb.WriteString("| CVE ID | Severity | Affected Images |\n")
+			sb.WriteString("|--------|----------|------------------|\n")
+			currentSeverity = cve.Severity
+		}
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cve.ID, cve.Severity, strings.Join(cve.Images, ", ")))
+	}
+	return sb.String()
 }
 
 // Add this function to save the report to a file
