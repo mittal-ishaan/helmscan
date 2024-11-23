@@ -2,6 +2,7 @@ package helmscan
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -66,9 +67,9 @@ type HelmComparison struct {
 	RemovedImages   map[string][]*ContainerImage
 	ChangedImages   map[string][]*ContainerImage
 	UnChangedImages map[string][]*ContainerImage
-	RemovedCVEs     map[string]map[string]imageScan.Vulnerability
-	AddedCVEs       map[string]map[string]imageScan.Vulnerability
-	UnchangedCVEs   map[string]map[string]imageScan.Vulnerability
+	RemovedCVEs     map[string]map[string]reports.Vulnerability
+	AddedCVEs       map[string]map[string]reports.Vulnerability
+	UnchangedCVEs   map[string]map[string]reports.Vulnerability
 }
 
 type HelmChart struct {
@@ -186,9 +187,9 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 		RemovedImages:   make(map[string][]*ContainerImage),
 		ChangedImages:   make(map[string][]*ContainerImage),
 		UnChangedImages: make(map[string][]*ContainerImage),
-		RemovedCVEs:     make(map[string]map[string]imageScan.Vulnerability),
-		AddedCVEs:       make(map[string]map[string]imageScan.Vulnerability),
-		UnchangedCVEs:   make(map[string]map[string]imageScan.Vulnerability),
+		RemovedCVEs:     make(map[string]map[string]reports.Vulnerability),
+		AddedCVEs:       make(map[string]map[string]reports.Vulnerability),
+		UnchangedCVEs:   make(map[string]map[string]reports.Vulnerability),
 	}
 
 	beforeImages := make(map[string]*ContainerImage)
@@ -211,7 +212,7 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 				comparison.UnChangedImages[name] = []*ContainerImage{beforeImg, afterImg}
 				for ID, vuln := range beforeImg.Vulnerabilities {
 					if _, exists := comparison.UnchangedCVEs[ID]; !exists {
-						comparison.UnchangedCVEs[ID] = make(map[string]imageScan.Vulnerability)
+						comparison.UnchangedCVEs[ID] = make(map[string]reports.Vulnerability)
 					}
 					comparison.UnchangedCVEs[ID][name] = vuln
 				}
@@ -220,7 +221,7 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 			comparison.RemovedImages[name] = []*ContainerImage{beforeImg}
 			for ID, vuln := range beforeImg.Vulnerabilities {
 				if _, exists := comparison.RemovedCVEs[ID]; !exists {
-					comparison.RemovedCVEs[ID] = make(map[string]imageScan.Vulnerability)
+					comparison.RemovedCVEs[ID] = make(map[string]reports.Vulnerability)
 					comparison.RemovedCVEs[ID][name] = vuln
 				} else {
 					comparison.RemovedCVEs[ID][name] = vuln
@@ -234,7 +235,7 @@ func CompareHelmCharts(before, after HelmChart) HelmComparison {
 			comparison.AddedImages[name] = []*ContainerImage{afterImg}
 			for ID, vuln := range afterImg.Vulnerabilities {
 				if _, exists := comparison.AddedCVEs[ID]; !exists {
-					comparison.AddedCVEs[ID] = make(map[string]imageScan.Vulnerability)
+					comparison.AddedCVEs[ID] = make(map[string]reports.Vulnerability)
 					comparison.AddedCVEs[ID][name] = vuln
 				} else {
 					comparison.AddedCVEs[ID][name] = vuln
@@ -250,12 +251,12 @@ func compareImageVulnerabilities(before, after *ContainerImage, comparison *Helm
 	for id, vuln := range before.Vulnerabilities {
 		if _, exists := after.Vulnerabilities[id]; !exists {
 			if _, exists := comparison.RemovedCVEs[id]; !exists {
-				comparison.RemovedCVEs[id] = make(map[string]imageScan.Vulnerability)
+				comparison.RemovedCVEs[id] = make(map[string]reports.Vulnerability)
 			}
 			comparison.RemovedCVEs[id][before.ImageName] = vuln
 		} else {
 			if _, exists := comparison.UnchangedCVEs[id]; !exists {
-				comparison.UnchangedCVEs[id] = make(map[string]imageScan.Vulnerability)
+				comparison.UnchangedCVEs[id] = make(map[string]reports.Vulnerability)
 			}
 			comparison.UnchangedCVEs[id][before.ImageName] = vuln
 		}
@@ -264,7 +265,7 @@ func compareImageVulnerabilities(before, after *ContainerImage, comparison *Helm
 	for id, vuln := range after.Vulnerabilities {
 		if _, exists := before.Vulnerabilities[id]; !exists {
 			if _, exists := comparison.AddedCVEs[id]; !exists {
-				comparison.AddedCVEs[id] = make(map[string]imageScan.Vulnerability)
+				comparison.AddedCVEs[id] = make(map[string]reports.Vulnerability)
 			}
 			comparison.AddedCVEs[id][after.ImageName] = vuln
 		}
@@ -362,10 +363,48 @@ func downloadChart(repoName, chartName, version, destDir string) (string, error)
 	return chartPath, nil
 }
 
-func GenerateReport(comparison HelmComparison) string {
+func GenerateReport(comparison HelmComparison, generateJSON bool, generateMD bool) string {
+	var lastReport string
+
+	// Create base filename once
+	baseFilename := reports.CreateSafeFileName(
+		fmt.Sprintf("%s_%s_%s_to_%s_%s_%s_helm_comparison",
+			comparison.Before.HelmRepo,
+			comparison.Before.Name,
+			comparison.Before.Version,
+			comparison.After.HelmRepo,
+			comparison.After.Name,
+			comparison.After.Version))
+
+	// Generate markdown report if requested
+	if generateMD {
+		mdReport := generateMarkdownReport(comparison)
+		lastReport = mdReport
+
+		if err := reports.SaveToFile(mdReport, baseFilename+".md"); err != nil {
+			fmt.Printf("Error saving markdown report: %v\n", err)
+		}
+	}
+
+	// Generate JSON report if requested
+	if generateJSON {
+		jsonReport := generateJSONReport(comparison)
+		lastReport = jsonReport
+
+		if err := reports.SaveToFile(jsonReport, baseFilename+".json"); err != nil {
+			fmt.Printf("Error saving JSON report: %v\n", err)
+		}
+	}
+
+	return lastReport
+}
+
+func generateMarkdownReport(comparison HelmComparison) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("## Helm Chart Comparison Report %s/%s@%s to %s/%s@%s\n\n", comparison.Before.HelmRepo, comparison.Before.Name, comparison.Before.Version, comparison.After.HelmRepo, comparison.After.Name, comparison.After.Version))
+	sb.WriteString(fmt.Sprintf("## Helm Chart Comparison Report %s/%s@%s to %s/%s@%s\n\n",
+		comparison.Before.HelmRepo, comparison.Before.Name, comparison.Before.Version,
+		comparison.After.HelmRepo, comparison.After.Name, comparison.After.Version))
 
 	// CVE by Severity
 	sb.WriteString("### CVE by Severity\n\n")
@@ -393,7 +432,7 @@ func GenerateReport(comparison HelmComparison) string {
 		count := currentCounts[severity]
 		prevCount := prevCounts[severity]
 		difference := count - prevCount
-		differenceStr := fmt.Sprintf("%+d", difference) // Use %+d to always show the sign
+		differenceStr := fmt.Sprintf("%+d", difference)
 
 		sb.WriteString(fmt.Sprintf("| %s | %d | %d | %s |\n", severity, count, prevCount, differenceStr))
 	}
@@ -407,35 +446,37 @@ func GenerateReport(comparison HelmComparison) string {
 	var imageRows []string
 
 	for name, images := range comparison.AddedImages {
-		imageRows = append(imageRows, fmt.Sprintf("| %s | Added | - | %s | - | %s |", name, images[0].Repository, images[0].Tag))
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Added | - | %s | - | %s |",
+			name, images[0].Repository, images[0].Tag))
 	}
 
 	for name, images := range comparison.RemovedImages {
-		imageRows = append(imageRows, fmt.Sprintf("| %s | Removed | %s | - | %s | - |", name, images[0].Repository, images[0].Tag))
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Removed | %s | - | %s | - |",
+			name, images[0].Repository, images[0].Tag))
 	}
 
 	for name, images := range comparison.ChangedImages {
-		imageRows = append(imageRows, fmt.Sprintf("| %s | Changed | %s | %s | %s | %s |", name, images[0].Repository, images[1].Repository, images[0].Tag, images[1].Tag))
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Changed | %s | %s | %s | %s |",
+			name, images[0].Repository, images[1].Repository, images[0].Tag, images[1].Tag))
 	}
 
 	for name, images := range comparison.UnChangedImages {
-		imageRows = append(imageRows, fmt.Sprintf("| %s | Unchanged | %s | %s | %s | %s |", name, images[0].Repository, images[1].Repository, images[0].Tag, images[1].Tag))
+		imageRows = append(imageRows, fmt.Sprintf("| %s | Unchanged | %s | %s | %s | %s |",
+			name, images[0].Repository, images[1].Repository, images[0].Tag, images[1].Tag))
 	}
 
 	sb.WriteString(strings.Join(imageRows, "\n"))
 	sb.WriteString("\n\n")
 
-	// Unchanged CVEs table
+	// CVEs tables
 	sb.WriteString("### Unchanged CVEs\n\n")
 	sb.WriteString(sortAndFormatCVEs(comparison.UnchangedCVEs))
 	sb.WriteString("\n\n")
 
-	// Added CVEs table
 	sb.WriteString("### Added CVEs\n\n")
 	sb.WriteString(sortAndFormatCVEs(comparison.AddedCVEs))
 	sb.WriteString("\n\n")
 
-	// Removed CVEs table
 	sb.WriteString("### Removed CVEs\n\n")
 	sb.WriteString(sortAndFormatCVEs(comparison.RemovedCVEs))
 	sb.WriteString("\n")
@@ -443,37 +484,47 @@ func GenerateReport(comparison HelmComparison) string {
 	return sb.String()
 }
 
-type sortableCVE struct {
-	ID       string
-	Severity string
-	Images   []string
-}
-
-type sortableCVEList []sortableCVE
-
-func (s sortableCVEList) Len() int      { return len(s) }
-func (s sortableCVEList) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-func (s sortableCVEList) Less(i, j int) bool {
-	if reports.SeverityValue(s[i].Severity) == reports.SeverityValue(s[j].Severity) {
-		return s[i].ID < s[j].ID
+func generateJSONReport(comparison HelmComparison) string {
+	report := reports.JSONReport{
+		ReportType: "helm_comparison",
+		Comparison: map[string]string{
+			"before_chart": fmt.Sprintf("%s/%s@%s", comparison.Before.HelmRepo, comparison.Before.Name, comparison.Before.Version),
+			"after_chart":  fmt.Sprintf("%s/%s@%s", comparison.After.HelmRepo, comparison.After.Name, comparison.After.Version),
+		},
+		Summary: reports.Summary{
+			SeverityCounts: generateJSONSeverityCounts(comparison),
+			ImageChanges:   generateJSONImageChanges(comparison),
+		},
+		AddedCVEs:     reports.ConvertToJSONCVEs(comparison.AddedCVEs),
+		RemovedCVEs:   reports.ConvertToJSONCVEs(comparison.RemovedCVEs),
+		UnchangedCVEs: reports.ConvertToJSONCVEs(comparison.UnchangedCVEs),
 	}
-	return reports.SeverityValue(s[i].Severity) > reports.SeverityValue(s[j].Severity)
+
+	jsonBytes, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error generating JSON report: %v", err)
+	}
+	return string(jsonBytes)
 }
 
-func sortAndFormatCVEs(cves map[string]map[string]imageScan.Vulnerability) string {
+func sortAndFormatCVEs(cves map[string]map[string]reports.Vulnerability) string {
 	if len(cves) == 0 {
 		return "No CVEs found.\n\n"
 	}
 
-	var sortedCVEs sortableCVEList
+	var sortedCVEs reports.SortableCVEList
 	for cveID, imageVulns := range cves {
 		var images []string
 		var severity string
 		for imageName, vuln := range imageVulns {
 			images = append(images, imageName)
-			severity = vuln.Severity
+			severity = vuln.GetSeverity()
 		}
-		sortedCVEs = append(sortedCVEs, sortableCVE{ID: cveID, Severity: severity, Images: images})
+		sortedCVEs = append(sortedCVEs, reports.SortableCVE{
+			ID:       cveID,
+			Severity: severity,
+			Images:   images,
+		})
 	}
 
 	sort.Sort(sortedCVEs)
@@ -496,4 +547,88 @@ func sortAndFormatCVEs(cves map[string]map[string]imageScan.Vulnerability) strin
 		sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cve.ID, cve.Severity, strings.Join(cve.Images, ", ")))
 	}
 	return sb.String()
+}
+
+func generateJSONSeverityCounts(comparison HelmComparison) []reports.SeverityCount {
+	severities := []string{"critical", "high", "medium", "low"}
+	counts := make([]reports.SeverityCount, 0, len(severities))
+
+	prevCounts := make(map[string]int)
+	currentCounts := make(map[string]int)
+
+	// Count vulnerabilities for both images
+	for _, img := range comparison.Before.ContainsImages {
+		for _, vuln := range img.Vulnerabilities {
+			prevCounts[vuln.Severity]++
+		}
+	}
+	for _, img := range comparison.After.ContainsImages {
+		for _, vuln := range img.Vulnerabilities {
+			currentCounts[vuln.Severity]++
+		}
+	}
+
+	// Generate counts for each severity
+	for _, severity := range severities {
+		current := currentCounts[severity]
+		previous := prevCounts[severity]
+		counts = append(counts, reports.SeverityCount{
+			Severity:   severity,
+			Current:    current,
+			Previous:   previous,
+			Difference: current - previous,
+		})
+	}
+
+	return counts
+}
+
+func generateJSONImageChanges(comparison HelmComparison) []reports.ImageChange {
+	var changes []reports.ImageChange
+
+	// Add added images
+	for name, images := range comparison.AddedImages {
+		changes = append(changes, reports.ImageChange{
+			Name:      name,
+			Status:    "Added",
+			AfterRepo: images[0].Repository,
+			AfterTag:  images[0].Tag,
+		})
+	}
+
+	// Add removed images
+	for name, images := range comparison.RemovedImages {
+		changes = append(changes, reports.ImageChange{
+			Name:       name,
+			Status:     "Removed",
+			BeforeRepo: images[0].Repository,
+			BeforeTag:  images[0].Tag,
+		})
+	}
+
+	// Add changed images
+	for name, images := range comparison.ChangedImages {
+		changes = append(changes, reports.ImageChange{
+			Name:       name,
+			Status:     "Changed",
+			BeforeRepo: images[0].Repository,
+			AfterRepo:  images[1].Repository,
+			BeforeTag:  images[0].Tag,
+			AfterTag:   images[1].Tag,
+		})
+	}
+
+	// Add unchanged images
+	for name, images := range comparison.UnChangedImages {
+		changes = append(changes, reports.ImageChange{
+			Name:       name,
+			Status:     "Unchanged",
+			BeforeRepo: images[0].Repository,
+			AfterRepo:  images[0].Repository,
+			BeforeTag:  images[0].Tag,
+			AfterTag:   images[0].Tag,
+		})
+	}
+
+	return changes
 }

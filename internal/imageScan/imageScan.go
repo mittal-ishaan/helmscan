@@ -239,7 +239,94 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-func GenerateReport(comparison *ImageComparisonReport) string {
+func GenerateReport(comparison *ImageComparisonReport, generateJSON bool, generateMD bool) string {
+	var lastReport string
+
+	// Create base filename once
+	baseFilename := reports.CreateSafeFileName(
+		fmt.Sprintf("%s_to_%s_image_comparison",
+			comparison.Image1.Image,
+			comparison.Image2.Image))
+
+	// Generate markdown report if requested
+	if generateMD {
+		mdReport := generateMarkdownReport(comparison)
+		lastReport = mdReport
+
+		if err := reports.SaveToFile(mdReport, baseFilename+".md"); err != nil {
+			fmt.Printf("Error saving markdown report: %v\n", err)
+		}
+	}
+
+	// Generate JSON report if requested
+	if generateJSON {
+		jsonReport := generateJSONReport(comparison)
+		lastReport = jsonReport
+
+		if err := reports.SaveToFile(jsonReport, baseFilename+".json"); err != nil {
+			fmt.Printf("Error saving JSON report: %v\n", err)
+		}
+	}
+
+	return lastReport
+}
+
+func generateJSONReport(comparison *ImageComparisonReport) string {
+	// Convert the map[string][]Vulnerability to map[string]map[string]interface{}
+	addedCVEs := convertVulnMapToInterface(comparison.AddedCVEs)
+	removedCVEs := convertVulnMapToInterface(comparison.RemovedCVEs)
+	unchangedCVEs := convertVulnMapToInterface(comparison.UnchangedCVEs)
+
+	report := reports.JSONReport{
+		ReportType: "image_comparison",
+		Comparison: map[string]string{
+			"image1": comparison.Image1.Image,
+			"image2": comparison.Image2.Image,
+		},
+		Summary: reports.Summary{
+			SeverityCounts: generateJSONSeverityCounts(comparison),
+		},
+		AddedCVEs:     reports.ConvertToJSONCVEs(addedCVEs),
+		RemovedCVEs:   reports.ConvertToJSONCVEs(removedCVEs),
+		UnchangedCVEs: reports.ConvertToJSONCVEs(unchangedCVEs),
+	}
+
+	jsonBytes, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error generating JSON report: %v", err)
+	}
+	return string(jsonBytes)
+}
+
+func generateJSONSeverityCounts(comparison *ImageComparisonReport) []reports.SeverityCount {
+	severities := []string{"critical", "high", "medium", "low"}
+	counts := make([]reports.SeverityCount, 0, len(severities))
+
+	prevCounts := make(map[string]int)
+	currentCounts := make(map[string]int)
+
+	for _, vuln := range comparison.Image1.VulnList {
+		prevCounts[vuln.Severity]++
+	}
+	for _, vuln := range comparison.Image2.VulnList {
+		currentCounts[vuln.Severity]++
+	}
+
+	for _, severity := range severities {
+		current := currentCounts[severity]
+		previous := prevCounts[severity]
+		counts = append(counts, reports.SeverityCount{
+			Severity:   severity,
+			Current:    current,
+			Previous:   previous,
+			Difference: current - previous,
+		})
+	}
+
+	return counts
+}
+
+func generateMarkdownReport(comparison *ImageComparisonReport) string {
 	var sb strings.Builder
 
 	sb.WriteString("## Image Comparison Report\n")
@@ -349,4 +436,32 @@ func generateSeverityRows(comparison *ImageComparisonReport) [][]string {
 	}
 
 	return rows
+}
+
+// Add GetSeverity method to Vulnerability type to satisfy the interface
+func (v Vulnerability) GetSeverity() string {
+	return v.Severity
+}
+
+// Add GetID method to satisfy the reports.Vulnerability interface
+func (v Vulnerability) GetID() string {
+	return v.ID
+}
+
+// Update convertVulnMapToInterface to convert []Vulnerability to map[string]Vulnerability
+func convertVulnMapToInterface(vulns map[string][]Vulnerability) map[string]map[string]reports.Vulnerability {
+	result := make(map[string]map[string]reports.Vulnerability)
+
+	for severity, vulnList := range vulns {
+		if _, exists := result[severity]; !exists {
+			result[severity] = make(map[string]reports.Vulnerability)
+		}
+		for _, vuln := range vulnList {
+			result[vuln.ID] = map[string]reports.Vulnerability{
+				"vulnerability": vuln,
+			}
+		}
+	}
+
+	return result
 }

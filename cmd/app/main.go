@@ -67,6 +67,7 @@ func main() {
 
 	compareFlag := flag.Bool("compare", false, "Compare two images or Helm charts")
 	reportFlag := flag.Bool("report", false, "Save the report to a file")
+	jsonFlag := flag.Bool("json", false, "Output report in JSON format")
 	flag.Parse()
 	args := flag.Args()
 
@@ -74,7 +75,7 @@ func main() {
 		if len(args) != 2 {
 			logger.Fatalf("For comparison, please provide exactly two image URLs or Helm chart references. Got: %v", args)
 		}
-		compareArtifacts(args[0], args[1], *reportFlag)
+		compareArtifacts(args[0], args[1], *reportFlag, *jsonFlag)
 	} else if len(args) == 1 {
 		scanSingleArtifact(args[0])
 	} else if len(args) == 0 {
@@ -93,7 +94,7 @@ func runInteractiveMenu() {
 		case "1":
 			scanArtifact()
 		case "2":
-			compareArtifacts("", "", true)
+			compareArtifacts("", "", true, false)
 		case "3":
 			logger.Info("Exiting the program. Goodbye!")
 			return
@@ -131,7 +132,7 @@ func scanArtifact() {
 	scanSingleArtifact(artifactRef)
 }
 
-func compareArtifacts(ref1, ref2 string, saveReport bool) {
+func compareArtifacts(ref1, ref2 string, saveReport bool, jsonOutput bool) {
 	if ref1 == "" || ref2 == "" {
 		fmt.Print("Enter the first image URL or Helm chart reference: ")
 		ref1 = getUserInput()
@@ -142,9 +143,9 @@ func compareArtifacts(ref1, ref2 string, saveReport bool) {
 	logger.Infof("Comparing artifacts: %s and %s", ref1, ref2)
 
 	if isHelmChart(ref1) && isHelmChart(ref2) {
-		compareHelmCharts(ref1, ref2, saveReport)
+		compareHelmCharts(ref1, ref2, saveReport, jsonOutput)
 	} else if !isHelmChart(ref1) && !isHelmChart(ref2) {
-		compareImages(ref1, ref2, saveReport)
+		compareImages(ref1, ref2, saveReport, jsonOutput)
 	} else {
 		logger.Fatal("Cannot compare a Helm chart with a Docker image. Please provide two Helm charts or two Docker images.")
 	}
@@ -179,7 +180,7 @@ func scanSingleHelmChart(chartRef string) {
 	//fmt.Println(helmscan.GenerateHelmComparisonReport(result))
 }
 
-func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
+func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool, jsonOutput bool) {
 	parts1 := strings.Split(chartRef1, "@")
 	parts2 := strings.Split(chartRef2, "@")
 	if len(parts1) != 2 || len(parts2) != 2 {
@@ -202,7 +203,7 @@ func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
 	}
 
 	comparison := helmscan.CompareHelmCharts(scannedChart1, scannedChart2)
-	report := helmscan.GenerateReport(comparison)
+	report := helmscan.GenerateReport(comparison, jsonOutput, saveReport)
 
 	// Print to console
 	//fmt.Println(report)
@@ -215,7 +216,7 @@ func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
 
 }
 
-func compareImages(imageURL1, imageURL2 string, saveReport bool) {
+func compareImages(imageURL1, imageURL2 string, saveReport bool, jsonOutput bool) {
 	if imageURL1 == "" || imageURL2 == "" {
 		fmt.Print("Enter the first image URL: ")
 		imageURL1 = getUserInput()
@@ -238,16 +239,21 @@ func compareImages(imageURL1, imageURL2 string, saveReport bool) {
 
 	// Compare the scans
 	comparison := imageScan.CompareScans(scan1, scan2)
-	report := imageScan.GenerateReport(comparison)
+	report := imageScan.GenerateReport(comparison, jsonOutput, saveReport)
 
 	// Print to console
 	fmt.Println(report)
 
 	// Save to file if requested
 	if saveReport {
-		filename := fmt.Sprintf("image_comparison_%s_%s.md",
+		ext := ".md"
+		if jsonOutput {
+			ext = ".json"
+		}
+		filename := fmt.Sprintf("image_comparison_%s_%s%s",
 			reports.CreateSafeFileName(imageURL1),
-			reports.CreateSafeFileName(imageURL2))
+			reports.CreateSafeFileName(imageURL2),
+			ext)
 		err = reports.SaveToFile(report, filename)
 		if err != nil {
 			logger.Errorf("Error saving report: %v", err)
