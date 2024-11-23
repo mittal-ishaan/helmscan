@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/cliffcolvin/image-comparison/internal/reports"
 )
 
 type GitHubRelease struct {
@@ -20,15 +22,12 @@ type ScanResult struct {
 	VulnList        []Vulnerability
 }
 
-type VulnerabilityReport struct {
-	Image1Name      string
-	Image2Name      string
-	TotalCVEsImage1 SeverityCounts
-	TotalCVEsImage2 SeverityCounts
-	RemovedCVEs     SeverityCounts
-	AddedCVEs       SeverityCounts
-	RemovedByLevel  map[string][]string
-	AddedByLevel    map[string][]string
+type ImageComparisonReport struct {
+	Image1        ScanResult
+	Image2        ScanResult
+	RemovedCVEs   map[string][]Vulnerability
+	AddedCVEs     map[string][]Vulnerability
+	UnchangedCVEs map[string][]Vulnerability
 }
 
 type Vulnerability struct {
@@ -49,15 +48,15 @@ func ScanImage(imageName string) (ScanResult, error) {
 	}
 
 	// Create a safe filename from the image name
-	safeFileName := createSafeFileName(imageName)
+	safeFileName := reports.CreateSafeFileName(imageName)
 	outputFile := fmt.Sprintf("working-files/%s_trivy_output.json", safeFileName)
 
 	cmd := exec.Command("trivy", "image",
 		"-f", "json",
 		"-o", outputFile,
 		"--severity", "HIGH,MEDIUM,LOW,CRITICAL",
-		"--vuln-type", "os,library",
-		"--scanners", "vuln,secret,config",
+		"--pkg-types", "os,library",
+		"--scanners", "vuln,secret,misconfig",
 		imageName)
 
 	combinedOutput, err := cmd.CombinedOutput()
@@ -82,15 +81,6 @@ func ScanImage(imageName string) (ScanResult, error) {
 	return result, nil
 }
 
-func createSafeFileName(imageName string) string {
-	unsafe := []string{"/", ":", "-", ".", " ", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")"}
-	safeFileName := imageName
-	for _, char := range unsafe {
-		safeFileName = strings.ReplaceAll(safeFileName, char, "_")
-	}
-	return safeFileName
-}
-
 func countVulnerabilities(vulns []Vulnerability) SeverityCounts {
 	counts := SeverityCounts{}
 	for _, vuln := range vulns {
@@ -107,21 +97,43 @@ func groupVulnerabilitiesByLevel(vulns []Vulnerability) map[string][]string {
 	return grouped
 }
 
-func CompareScans(firstScan, secondScan ScanResult) *VulnerabilityReport {
-	report := &VulnerabilityReport{
-		Image1Name:      firstScan.Image,
-		Image2Name:      secondScan.Image,
-		TotalCVEsImage1: firstScan.Vulnerabilities,
-		TotalCVEsImage2: secondScan.Vulnerabilities,
-		RemovedByLevel:  make(map[string][]string),
-		AddedByLevel:    make(map[string][]string),
+func CompareScans(firstScan, secondScan ScanResult) *ImageComparisonReport {
+	comparison := &ImageComparisonReport{
+		Image1:        firstScan,
+		Image2:        secondScan,
+		RemovedCVEs:   make(map[string][]Vulnerability),
+		AddedCVEs:     make(map[string][]Vulnerability),
+		UnchangedCVEs: make(map[string][]Vulnerability),
 	}
 
-	// Calculate removed and added vulnerabilities
-	report.RemovedCVEs, report.RemovedByLevel = calculateDifference(firstScan.VulnsByLevel, secondScan.VulnsByLevel)
-	report.AddedCVEs, report.AddedByLevel = calculateDifference(secondScan.VulnsByLevel, firstScan.VulnsByLevel)
+	// Create maps for easier lookup
+	firstVulns := make(map[string]Vulnerability)
+	for _, vuln := range firstScan.VulnList {
+		firstVulns[vuln.ID] = vuln
+	}
 
-	return report
+	secondVulns := make(map[string]Vulnerability)
+	for _, vuln := range secondScan.VulnList {
+		secondVulns[vuln.ID] = vuln
+	}
+
+	// Find removed and unchanged vulnerabilities
+	for id, vuln := range firstVulns {
+		if _, exists := secondVulns[id]; exists {
+			comparison.UnchangedCVEs[vuln.Severity] = append(comparison.UnchangedCVEs[vuln.Severity], vuln)
+		} else {
+			comparison.RemovedCVEs[vuln.Severity] = append(comparison.RemovedCVEs[vuln.Severity], vuln)
+		}
+	}
+
+	// Find added vulnerabilities
+	for id, vuln := range secondVulns {
+		if _, exists := firstVulns[id]; !exists {
+			comparison.AddedCVEs[vuln.Severity] = append(comparison.AddedCVEs[vuln.Severity], vuln)
+		}
+	}
+
+	return comparison
 }
 
 func extractVulnerabilities(scan string) []Vulnerability {
@@ -201,20 +213,21 @@ func CheckTrivyInstallation() error {
 	return nil
 }
 
-func calculateDifference(before, after map[string][]string) (SeverityCounts, map[string][]string) {
-	diff := make(map[string][]string)
-	counts := SeverityCounts{}
+func calculateDifference(before, after map[string][]string) map[string][]Vulnerability {
+	diff := make(map[string][]Vulnerability)
 
 	for severity, vulns := range before {
 		for _, vuln := range vulns {
 			if !contains(after[severity], vuln) {
-				diff[severity] = append(diff[severity], vuln)
-				incrementSeverityCount(&counts, severity)
+				diff[severity] = append(diff[severity], Vulnerability{
+					ID:       vuln,
+					Severity: severity,
+				})
 			}
 		}
 	}
 
-	return counts, diff
+	return diff
 }
 
 func contains(slice []string, item string) bool {
@@ -226,109 +239,114 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-func PrintComparisonReport(report *VulnerabilityReport, saveReport bool) error {
-	// Create a report
+func GenerateReport(comparison *ImageComparisonReport) string {
 	var sb strings.Builder
-	sb.WriteString("## Vulnerability Comparison Report\n")
-	sb.WriteString(fmt.Sprintf("### Comparing images: %s and %s\n", report.Image1Name, report.Image2Name))
 
-	// Image 1 summary
-	sb.WriteString(fmt.Sprintf("#### Image 1: %s\n", report.Image1Name))
-	sb.WriteString(fmt.Sprintf("#### Total vulnerabilities: %d\n\n",
-		report.TotalCVEsImage1.Critical+report.TotalCVEsImage1.High+
-			report.TotalCVEsImage1.Medium+report.TotalCVEsImage1.Low))
-	sb.WriteString(formatVulnerabilityCountsTable(report.TotalCVEsImage1))
-	sb.WriteString("\n")
+	sb.WriteString("## Image Comparison Report\n")
+	sb.WriteString(fmt.Sprintf("### Comparing images: %s and %s\n\n",
+		comparison.Image1.Image, comparison.Image2.Image))
 
-	// Image 2 summary
-	sb.WriteString(fmt.Sprintf("#### Image 2: %s\n", report.Image2Name))
-	sb.WriteString(fmt.Sprintf("#### Total vulnerabilities: %d\n\n",
-		report.TotalCVEsImage2.Critical+report.TotalCVEsImage2.High+
-			report.TotalCVEsImage2.Medium+report.TotalCVEsImage2.Low))
-	sb.WriteString(formatVulnerabilityCountsTable(report.TotalCVEsImage2))
-	sb.WriteString("\n")
+	// CVE by Severity section
+	headers := []string{"Severity", "Count", "Prev Count", "Difference"}
+	rows := generateSeverityRows(comparison) // helper function to generate rows
+	sb.WriteString(reports.FormatSection("CVE by Severity",
+		reports.FormatMarkdownTable(headers, rows)))
 
-	// Generate and print the report for added vulnerabilities
-	sb.WriteString("### Added vulnerabilities:\n")
-	sb.WriteString(printVulnerabilityReport(report.AddedByLevel))
-
-	// Generate and print the report for removed vulnerabilities
-	sb.WriteString("### Removed vulnerabilities:\n")
-	sb.WriteString(printVulnerabilityReport(report.RemovedByLevel))
-
-	if saveReport {
-		filename := generateFilename(report.Image1Name, report.Image2Name)
-		err := saveReportToFile(sb.String(), filename)
-		if err != nil {
-			errReturn := fmt.Errorf("error saving report to file: %v", err)
-			return errReturn
-		}
+	// Unchanged CVEs section
+	sb.WriteString("### Unchanged CVEs\n\n")
+	if len(comparison.UnchangedCVEs) == 0 {
+		sb.WriteString("No unchanged vulnerabilities found.\n\n")
+	} else {
+		sb.WriteString(formatVulnerabilitySection(comparison.UnchangedCVEs))
 	}
 
-	fmt.Println(sb.String())
-	return nil
+	// Added CVEs section
+	sb.WriteString("### Added CVEs\n\n")
+	if len(comparison.AddedCVEs) == 0 {
+		sb.WriteString("No new vulnerabilities found.\n\n")
+	} else {
+		sb.WriteString(formatVulnerabilitySection(comparison.AddedCVEs))
+	}
+
+	// Removed CVEs section
+	sb.WriteString("### Removed CVEs\n\n")
+	if len(comparison.RemovedCVEs) == 0 {
+		sb.WriteString("No removed vulnerabilities found.\n\n")
+	} else {
+		sb.WriteString(formatVulnerabilitySection(comparison.RemovedCVEs))
+	}
+
+	return sb.String()
 }
 
-func formatVulnerabilityCountsTable(counts SeverityCounts) string {
-	return fmt.Sprintf(`| Severity | Count |
-|----------|-------|
-| Critical | %d    |
-| High     | %d    |
-| Medium   | %d    |
-| Low      | %d    |
-`, counts.Critical, counts.High, counts.Medium, counts.Low)
-}
-
-func printVulnerabilityReport(vulnerabilities map[string][]string) string {
+func formatVulnerabilitySection(vulns map[string][]Vulnerability) string {
 	var sb strings.Builder
-	for severity, vulnIDs := range vulnerabilities {
-		sb.WriteString(fmt.Sprintf("#### %s\n", severity))
-		sb.WriteString("| VulnerabilityID |\n")
-		sb.WriteString("| --------------- |\n")
-		for _, id := range vulnIDs {
-			sb.WriteString(fmt.Sprintf("| %s |\n", id))
+
+	if len(vulns) == 0 {
+		return "No vulnerabilities found.\n\n"
+	}
+
+	// Sort severities
+	severities := make([]string, 0, len(vulns))
+	for severity := range vulns {
+		severities = append(severities, severity)
+	}
+	sort.Slice(severities, func(i, j int) bool {
+		return reports.SeverityValue(severities[i]) > reports.SeverityValue(severities[j])
+	})
+
+	for _, severity := range severities {
+		if len(vulns[severity]) > 0 {
+			sb.WriteString(fmt.Sprintf("#### %s\n", strings.Title(severity)))
+			sb.WriteString("| CVE ID | Severity |\n")
+			sb.WriteString("|---------|----------|\n")
+
+			// Sort vulnerabilities by ID
+			sort.Slice(vulns[severity], func(i, j int) bool {
+				return vulns[severity][i].ID < vulns[severity][j].ID
+			})
+
+			for _, vuln := range vulns[severity] {
+				sb.WriteString(fmt.Sprintf("| %s | %s |\n", vuln.ID, vuln.Severity))
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
 	}
 	return sb.String()
 }
 
-func generateFilename(ref1, ref2 string) string {
-	// Extract image names and tags
-	getName := func(ref string) (string, string) {
-		parts := strings.Split(ref, ":")
-		name := strings.Split(parts[0], "/")
-		tag := "latest"
-		if len(parts) > 1 {
-			tag = parts[1]
-		}
-		return name[len(name)-1], tag
+func generateSeverityRows(comparison *ImageComparisonReport) [][]string {
+	severities := []string{"critical", "high", "medium", "low"}
+	var rows [][]string
+
+	// Count current and previous vulnerabilities by severity
+	prevCounts := make(map[string]int)
+	currentCounts := make(map[string]int)
+
+	// Count previous vulnerabilities
+	for _, vuln := range comparison.Image1.VulnList {
+		prevCounts[vuln.Severity]++
 	}
 
-	name1, tag1 := getName(ref1)
-	name2, tag2 := getName(ref2)
-
-	// Create a sanitized filename
-	filename := fmt.Sprintf("%s-%s_%s-%s", name1, tag1, name2, tag2)
-	filename = sanitizeFilename(filename)
-	filename = fmt.Sprintf("%s.md", filename)
-
-	return filename
-}
-
-func sanitizeFilename(filename string) string {
-	// Replace any character that isn't alphanumeric, underscore, or hyphen with an underscore
-	reg := regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
-	return reg.ReplaceAllString(filename, "_")
-}
-
-func saveReportToFile(content, filename string) error {
-	file, err := os.Create(strings.Join([]string{"working-files", filename}, "/"))
-	if err != nil {
-		return err
+	// Count current vulnerabilities
+	for _, vuln := range comparison.Image2.VulnList {
+		currentCounts[vuln.Severity]++
 	}
-	defer file.Close()
 
-	_, err = file.WriteString(content)
-	return err
+	// Generate table rows
+	for _, severity := range severities {
+		count := currentCounts[severity]
+		prevCount := prevCounts[severity]
+		difference := count - prevCount
+		differenceStr := fmt.Sprintf("%+d", difference) // Use %+d to always show the sign
+
+		rows = append(rows, []string{
+			severity,
+			fmt.Sprintf("%d", count),
+			fmt.Sprintf("%d", prevCount),
+			differenceStr,
+		})
+	}
+
+	return rows
 }

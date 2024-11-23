@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
+	"github.com/cliffcolvin/image-comparison/internal/reports"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"helm.sh/helm/v3/pkg/action"
@@ -442,21 +443,6 @@ func GenerateReport(comparison HelmComparison) string {
 	return sb.String()
 }
 
-func severityValue(severity string) int {
-	switch strings.ToLower(severity) {
-	case "critical":
-		return 4
-	case "high":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	default:
-		return 0
-	}
-}
-
 type sortableCVE struct {
 	ID       string
 	Severity string
@@ -468,13 +454,17 @@ type sortableCVEList []sortableCVE
 func (s sortableCVEList) Len() int      { return len(s) }
 func (s sortableCVEList) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 func (s sortableCVEList) Less(i, j int) bool {
-	if severityValue(s[i].Severity) == severityValue(s[j].Severity) {
-		return s[i].ID < s[j].ID // Sort by ID if severity is the same
+	if reports.SeverityValue(s[i].Severity) == reports.SeverityValue(s[j].Severity) {
+		return s[i].ID < s[j].ID
 	}
-	return severityValue(s[i].Severity) > severityValue(s[j].Severity)
+	return reports.SeverityValue(s[i].Severity) > reports.SeverityValue(s[j].Severity)
 }
 
 func sortAndFormatCVEs(cves map[string]map[string]imageScan.Vulnerability) string {
+	if len(cves) == 0 {
+		return "No CVEs found.\n\n"
+	}
+
 	var sortedCVEs sortableCVEList
 	for cveID, imageVulns := range cves {
 		var images []string
@@ -506,9 +496,4 @@ func sortAndFormatCVEs(cves map[string]map[string]imageScan.Vulnerability) strin
 		sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cve.ID, cve.Severity, strings.Join(cve.Images, ", ")))
 	}
 	return sb.String()
-}
-
-// Add this function to save the report to a file
-func SaveReportToFile(report string, filename string) error {
-	return os.WriteFile(filename, []byte(report), 0644)
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/cliffcolvin/image-comparison/internal/helmscan"
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
+	"github.com/cliffcolvin/image-comparison/internal/reports"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -207,7 +208,7 @@ func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool) {
 	//fmt.Println(report)
 
 	// Save to file
-	err = helmscan.SaveReportToFile(report, "working-files/helm_comparison_report.md")
+	err = reports.SaveToFile(report, "helm_comparison_report.md")
 	if err != nil {
 		log.Fatalf("Error saving report: %v", err)
 	}
@@ -236,13 +237,22 @@ func compareImages(imageURL1, imageURL2 string, saveReport bool) {
 	}
 
 	// Compare the scans
-	report := imageScan.CompareScans(scan1, scan2)
-	err = imageScan.PrintComparisonReport(report, saveReport)
-	if err != nil {
-		logger.Errorf("Error printing comparison report: %v", err)
-		return
-	}
+	comparison := imageScan.CompareScans(scan1, scan2)
+	report := imageScan.GenerateReport(comparison)
 
+	// Print to console
+	fmt.Println(report)
+
+	// Save to file if requested
+	if saveReport {
+		filename := fmt.Sprintf("image_comparison_%s_%s.md",
+			reports.CreateSafeFileName(imageURL1),
+			reports.CreateSafeFileName(imageURL2))
+		err = reports.SaveToFile(report, filename)
+		if err != nil {
+			logger.Errorf("Error saving report: %v", err)
+		}
+	}
 }
 
 func ensureWorkingFilesDir() error {
