@@ -16,7 +16,7 @@ There are three main ways to use this tool:
 You can run the tool with command-line arguments to compare two artifacts:
 
 ```
-./image-comparison --compare [--report] [--json] <artifact1> <artifact2>
+./helmscan --compare [--report] [--json] <artifact1> <artifact2>
 ```
 
 Flags:
@@ -29,10 +29,10 @@ Flags:
 Examples:
 ```
 # Compare Docker images and generate both JSON and Markdown reports
-./image-comparison --compare --report --json docker.io/library/ubuntu:20.04 docker.io/library/ubuntu:22.04
+./helmscan --compare --report --json docker.io/library/ubuntu:20.04 docker.io/library/ubuntu:22.04
 
 # Compare Helm charts with only JSON output
-./image-comparison --compare --json myrepo/mychart@1.0.0 myrepo/mychart@2.0.0
+./helmscan --compare --json myrepo/mychart@1.0.0 myrepo/mychart@2.0.0
 ```
 
 ### 2. Interactive menu system
@@ -40,7 +40,7 @@ Examples:
 To use the interactive menu system, simply run the executable without any arguments:
 
 ```
-./image-comparison
+./helmscan
 ```
 
 Follow the on-screen prompts to:
@@ -53,16 +53,16 @@ Follow the on-screen prompts to:
 To scan a single artifact, provide its reference as an argument:
 
 ```
-./image-comparison <artifact_reference>
+./helmscan <artifact_reference>
 ```
 
 Example:
 ```
 # Scan a Docker image
-./image-comparison docker.io/library/ubuntu:22.04
+./helmscan docker.io/library/ubuntu:22.04
 
 # Scan a Helm chart
-./image-comparison myrepo/mychart@1.0.0
+./helmscan myrepo/mychart@1.0.0
 ```
 
 ## Output
