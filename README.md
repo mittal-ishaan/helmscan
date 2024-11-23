@@ -1,4 +1,4 @@
-# image-comparison
+# helmscan
 Docker Image and Helm Chart CVE comparison tool
 
 This tool allows you to scan and compare Docker images or Helm charts and analyze their CVE (Common Vulnerabilities and Exposures) reports.
