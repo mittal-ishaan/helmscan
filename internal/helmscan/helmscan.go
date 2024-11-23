@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cliffcolvin/image-comparison/internal/imageScan"
-	"github.com/cliffcolvin/image-comparison/internal/reports"
+	"github.com/cliffcolvin/helmscan/internal/imageScan"
+	"github.com/cliffcolvin/helmscan/internal/reports"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"helm.sh/helm/v3/pkg/action"

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cliffcolvin/image-comparison/internal/reports"
+	"github.com/cliffcolvin/helmscan/internal/reports"
 )
 
 type GitHubRelease struct {
