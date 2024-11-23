@@ -6,21 +6,53 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/helmscan"
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var logger *zap.SugaredLogger
 
 func init() {
-	zapLogger, _ := zap.NewProduction()
+	// Ensure the logs directory exists
+	logDir := "logs"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		panic("Failed to create log directory: " + err.Error())
+	}
+
+	// Create the log file
+	logFile, err := os.OpenFile(filepath.Join(logDir, "helmscan.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic("Failed to open log file: " + err.Error())
+	}
+
+	// Create a custom encoder config
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	// Create a custom core that writes to the file
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(logFile),
+		zap.InfoLevel,
+	)
+
+	// Create a logger with the custom core
+	zapLogger := zap.New(core)
 	defer zapLogger.Sync()
+
+	// Create a sugared logger
 	logger = zapLogger.Sugar()
 
+	logger.Info("Application started")
+
+	// Check Trivy installation
 	if err := imageScan.CheckTrivyInstallation(); err != nil {
 		logger.Fatalf("Trivy installation check failed: %v", err)
 	}

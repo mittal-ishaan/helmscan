@@ -25,3 +25,5 @@ go.work.sum
 .env
 working-files/
 HelmScan
+logs/
+launch.json

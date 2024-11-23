@@ -10,9 +10,53 @@ import (
 	"strings"
 
 	"github.com/cliffcolvin/image-comparison/internal/imageScan"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
 )
+
+var logger *zap.SugaredLogger
+
+func init() {
+	// Ensure the logs directory exists
+	logDir := "logs"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		panic("Failed to create log directory: " + err.Error())
+	}
+
+	// Create the log file
+	logFile, err := os.OpenFile(filepath.Join(logDir, "helmscan.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic("Failed to open log file: " + err.Error())
+	}
+
+	// Create a custom encoder config
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	// Create a custom core that writes to the file
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(logFile),
+		zap.InfoLevel,
+	)
+
+	// Create a logger with the custom core
+	zapLogger := zap.New(core)
+	defer zapLogger.Sync()
+
+	// Create a sugared logger
+	logger = zapLogger.Sugar()
+
+	logger.Info("Application started")
+
+	// Check Trivy installation
+	if err := imageScan.CheckTrivyInstallation(); err != nil {
+		logger.Fatalf("Trivy installation check failed: %v", err)
+	}
+}
 
 type HelmComparison struct {
 	Before          HelmChart
@@ -68,15 +112,19 @@ func Scan(chartRef string) (HelmChart, error) {
 	}
 
 	helm_repo_update_cmd := exec.Command("helm", "repo", "update")
-	if err := helm_repo_update_cmd.Run(); err != nil {
-		return HelmChart{}, fmt.Errorf("error updating Helm repo: %w", err)
+	output, err := helm_repo_update_cmd.CombinedOutput()
+	if err != nil {
+		logger.Errorf("Error updating Helm repo: %v\nOutput: %s", err, string(output))
+		return HelmChart{}, fmt.Errorf("error updating Helm repo: %v\nOutput: %s", err, string(output))
 	}
+	logger.Infof("Helm repo update output: %s", string(output))
 
 	// Use local Helm to template the chart
 	cmd := exec.Command("helm", "template", fmt.Sprintf("%s/%s", repoName, chartName), "--version", version)
-	output, err := cmd.Output()
+	output, err = cmd.CombinedOutput()
 	if err != nil {
-		return HelmChart{}, fmt.Errorf("error templating chart: %w", err)
+		logger.Errorf("Error templating chart: %v\nOutput: %s", err, string(output))
+		return HelmChart{}, fmt.Errorf("error templating chart: %v\nOutput: %s", err, string(output))
 	}
 
 	// Save the output to a file
