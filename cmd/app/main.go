@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/cliffcolvin/helmscan/internal/helmscan"
@@ -20,27 +19,16 @@ import (
 var logger *zap.SugaredLogger
 
 func init() {
-	// Ensure the logs directory exists
-	logDir := "logs"
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		panic("Failed to create log directory: " + err.Error())
-	}
-
-	// Create the log file
-	logFile, err := os.OpenFile(filepath.Join(logDir, "helmscan.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		panic("Failed to open log file: " + err.Error())
-	}
-
 	// Create a custom encoder config
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.TimeKey = "timestamp"
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
-	// Create a custom core that writes to the file
+	// Create a custom core that writes to console
 	core := zapcore.NewCore(
-		zapcore.NewJSONEncoder(encoderConfig),
-		zapcore.AddSync(logFile),
+		zapcore.NewConsoleEncoder(encoderConfig),
+		zapcore.AddSync(os.Stdout),
 		zap.InfoLevel,
 	)
 
@@ -77,7 +65,7 @@ func main() {
 		}
 		compareArtifacts(args[0], args[1], *reportFlag, *jsonFlag)
 	} else if len(args) == 1 {
-		scanSingleArtifact(args[0])
+		scanSingleArtifact(args[0], *reportFlag, *jsonFlag)
 	} else if len(args) == 0 {
 		runInteractiveMenu()
 	} else {
@@ -118,18 +106,18 @@ func getUserInput() string {
 	return strings.TrimSpace(input)
 }
 
-func scanSingleArtifact(artifactRef string) {
+func scanSingleArtifact(artifactRef string, saveReport bool, jsonOutput bool) {
 	if isHelmChart(artifactRef) {
-		scanSingleHelmChart(artifactRef)
+		scanSingleHelmChart(artifactRef, saveReport, jsonOutput)
 	} else {
-		scanSingleImage(artifactRef)
+		scanSingleImage(artifactRef, saveReport, jsonOutput)
 	}
 }
 
 func scanArtifact() {
 	fmt.Print("Enter the image URL or Helm chart reference to scan: ")
 	artifactRef := getUserInput()
-	scanSingleArtifact(artifactRef)
+	scanSingleArtifact(artifactRef, true, false)
 }
 
 func compareArtifacts(ref1, ref2 string, saveReport bool, jsonOutput bool) {
@@ -156,28 +144,42 @@ func isHelmChart(ref string) bool {
 	return strings.Contains(ref, "/") && strings.Contains(ref, "@")
 }
 
-func scanSingleImage(imageURL string) {
+func scanSingleImage(imageURL string, saveReport bool, jsonOutput bool) {
 	logger.Infof("Scanning image: %s", imageURL)
-	_, err := imageScan.ScanImage(imageURL)
+	result, err := imageScan.ScanImage(imageURL)
 	if err != nil {
 		logger.Errorf("Error scanning image: %v", err)
 		return
 	}
-	//fmt.Println(result)
+
+	// Generate and handle the report
+	report := imageScan.GenerateReport(&imageScan.ImageComparisonReport{
+		Image2: result,
+	}, jsonOutput, saveReport)
+
+	// Print to console
+	fmt.Println(report)
 }
 
-func scanSingleHelmChart(chartRef string) {
+func scanSingleHelmChart(chartRef string, saveReport bool, jsonOutput bool) {
 	logger.Infof("Scanning Helm chart: %s", chartRef)
 	parts := strings.Split(chartRef, "@")
 	if len(parts) != 2 {
 		logger.Fatalf("Invalid Helm chart reference. Expected format: repo/chart@version")
 	}
-	_, err := helmscan.Scan(chartRef)
+	result, err := helmscan.Scan(chartRef)
 	if err != nil {
 		logger.Errorf("Error scanning Helm chart: %v", err)
 		return
 	}
-	//fmt.Println(helmscan.GenerateHelmComparisonReport(result))
+
+	// Generate and handle the report
+	report := helmscan.GenerateReport(helmscan.HelmComparison{
+		After: result,
+	}, jsonOutput, saveReport)
+
+	// Print to console
+	fmt.Println(report)
 }
 
 func compareHelmCharts(chartRef1, chartRef2 string, saveReport bool, jsonOutput bool) {

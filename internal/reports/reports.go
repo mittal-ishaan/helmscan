@@ -1,6 +1,7 @@
 package reports
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,4 +130,112 @@ func ConvertToJSONCVEs(cves map[string]map[string]Vulnerability) []CVE {
 	}
 
 	return jsonCVEs
+}
+
+// Add these types after the existing types
+type SingleScanReport struct {
+	ArtifactType string // "helm" or "image"
+	ArtifactRef  string // Full reference to the scanned artifact
+	Summary      SeveritySummary
+	CVEs         []CVE
+}
+
+type SeveritySummary struct {
+	Critical int
+	High     int
+	Medium   int
+	Low      int
+}
+
+// Add these functions after the existing functions
+func GenerateSingleScanReport(artifactType string, artifactRef string, vulns map[string]Vulnerability, generateJSON bool) string {
+	report := SingleScanReport{
+		ArtifactType: artifactType,
+		ArtifactRef:  artifactRef,
+		Summary:      countVulnerabilities(vulns),
+		CVEs:         convertVulnerabilitiesToCVEs(vulns),
+	}
+
+	if generateJSON {
+		return generateJSONSingleReport(report)
+	}
+	return generateMarkdownSingleReport(report)
+}
+
+func countVulnerabilities(vulns map[string]Vulnerability) SeveritySummary {
+	summary := SeveritySummary{}
+	for _, vuln := range vulns {
+		switch strings.ToLower(vuln.GetSeverity()) {
+		case "critical":
+			summary.Critical++
+		case "high":
+			summary.High++
+		case "medium":
+			summary.Medium++
+		case "low":
+			summary.Low++
+		}
+	}
+	return summary
+}
+
+func convertVulnerabilitiesToCVEs(vulns map[string]Vulnerability) []CVE {
+	var cves []CVE
+	for id, vuln := range vulns {
+		cves = append(cves, CVE{
+			ID:       id,
+			Severity: vuln.GetSeverity(),
+		})
+	}
+
+	sort.Slice(cves, func(i, j int) bool {
+		if SeverityValue(cves[i].Severity) == SeverityValue(cves[j].Severity) {
+			return cves[i].ID < cves[j].ID
+		}
+		return SeverityValue(cves[i].Severity) > SeverityValue(cves[j].Severity)
+	})
+
+	return cves
+}
+
+func generateJSONSingleReport(report SingleScanReport) string {
+	jsonBytes, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error generating JSON report: %v", err)
+	}
+	return string(jsonBytes)
+}
+
+func generateMarkdownSingleReport(report SingleScanReport) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# %s Scan Report\n", strings.Title(report.ArtifactType)))
+	sb.WriteString(fmt.Sprintf("## Artifact: %s\n\n", report.ArtifactRef))
+
+	// Summary table
+	sb.WriteString("### Vulnerability Summary\n\n")
+	sb.WriteString("| Severity | Count |\n")
+	sb.WriteString("|----------|-------|\n")
+	sb.WriteString(fmt.Sprintf("| Critical | %d |\n", report.Summary.Critical))
+	sb.WriteString(fmt.Sprintf("| High | %d |\n", report.Summary.High))
+	sb.WriteString(fmt.Sprintf("| Medium | %d |\n", report.Summary.Medium))
+	sb.WriteString(fmt.Sprintf("| Low | %d |\n\n", report.Summary.Low))
+
+	// CVEs by severity
+	sb.WriteString("### Vulnerabilities\n\n")
+	currentSeverity := ""
+	for _, cve := range report.CVEs {
+		if cve.Severity != currentSeverity {
+			if currentSeverity != "" {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(fmt.Sprintf("#### %s\n", strings.Title(cve.Severity)))
+			sb.WriteString("| CVE ID | Severity |\n")
+			sb.WriteString("|---------|----------|\n")
+			currentSeverity = cve.Severity
+		}
+		sb.WriteString(fmt.Sprintf("| %s | %s |\n", cve.ID, cve.Severity))
+	}
+
+	return sb.String()
 }

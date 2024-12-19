@@ -9,7 +9,33 @@ import (
 	"strings"
 
 	"github.com/cliffcolvin/helmscan/internal/reports"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+var logger *zap.SugaredLogger
+
+func init() {
+	// Create a custom encoder config
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+
+	// Create a custom core that writes to console
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(encoderConfig),
+		zapcore.AddSync(os.Stdout),
+		zap.InfoLevel,
+	)
+
+	// Create a logger with the custom core
+	zapLogger := zap.New(core)
+	defer zapLogger.Sync()
+
+	// Create a sugared logger
+	logger = zapLogger.Sugar()
+}
 
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
@@ -464,4 +490,37 @@ func convertVulnMapToInterface(vulns map[string][]Vulnerability) map[string]map[
 	}
 
 	return result
+}
+
+func scanSingleImage(imageURL string, saveReport bool, jsonOutput bool) {
+	logger.Infof("Scanning image: %s", imageURL)
+	result, err := ScanImage(imageURL)
+	if err != nil {
+		logger.Errorf("Error scanning image: %v", err)
+		return
+	}
+
+	// Convert vulnerabilities to map
+	vulns := make(map[string]reports.Vulnerability)
+	for _, v := range result.VulnList {
+		vulns[v.ID] = v
+	}
+
+	// Generate report using the centralized report generator
+	report := reports.GenerateSingleScanReport("image", imageURL, vulns, jsonOutput)
+
+	// Save report if requested
+	if saveReport {
+		ext := ".md"
+		if jsonOutput {
+			ext = ".json"
+		}
+		filename := fmt.Sprintf("image_scan_%s%s", reports.CreateSafeFileName(imageURL), ext)
+		if err := reports.SaveToFile(report, filename); err != nil {
+			logger.Errorf("Error saving report: %v", err)
+		}
+	}
+
+	// Print to console
+	fmt.Println(report)
 }

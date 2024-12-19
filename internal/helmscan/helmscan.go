@@ -21,27 +21,16 @@ import (
 var logger *zap.SugaredLogger
 
 func init() {
-	// Ensure the logs directory exists
-	logDir := "logs"
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		panic("Failed to create log directory: " + err.Error())
-	}
-
-	// Create the log file
-	logFile, err := os.OpenFile(filepath.Join(logDir, "helmscan.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		panic("Failed to open log file: " + err.Error())
-	}
-
 	// Create a custom encoder config
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.TimeKey = "timestamp"
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
-	// Create a custom core that writes to the file
+	// Create a custom core that writes to console
 	core := zapcore.NewCore(
-		zapcore.NewJSONEncoder(encoderConfig),
-		zapcore.AddSync(logFile),
+		zapcore.NewConsoleEncoder(encoderConfig),
+		zapcore.AddSync(os.Stdout),
 		zap.InfoLevel,
 	)
 
@@ -631,4 +620,46 @@ func generateJSONImageChanges(comparison HelmComparison) []reports.ImageChange {
 	}
 
 	return changes
+}
+
+func GenerateSingleScanReport(chart HelmChart, jsonOutput bool) string {
+	// Collect all vulnerabilities from all images
+	vulns := make(map[string]reports.Vulnerability)
+	for _, img := range chart.ContainsImages {
+		for id, v := range img.Vulnerabilities {
+			// Create a composite key that includes the image name to avoid overwriting
+			vulns[fmt.Sprintf("%s:%s", img.ImageName, id)] = v
+		}
+	}
+
+	// Generate report using the centralized report generator
+	chartRef := fmt.Sprintf("%s/%s@%s", chart.HelmRepo, chart.Name, chart.Version)
+	return reports.GenerateSingleScanReport("helm", chartRef, vulns, jsonOutput)
+}
+
+func scanSingleHelmChart(chartRef string, saveReport bool, jsonOutput bool) {
+	logger.Infof("Scanning Helm chart: %s", chartRef)
+	result, err := Scan(chartRef)
+	if err != nil {
+		logger.Errorf("Error scanning Helm chart: %v", err)
+		return
+	}
+
+	// Generate report using the new function
+	report := GenerateSingleScanReport(result, jsonOutput)
+
+	// Save report if requested
+	if saveReport {
+		ext := ".md"
+		if jsonOutput {
+			ext = ".json"
+		}
+		filename := fmt.Sprintf("helm_scan_%s%s", reports.CreateSafeFileName(chartRef), ext)
+		if err := reports.SaveToFile(report, filename); err != nil {
+			logger.Errorf("Error saving report: %v", err)
+		}
+	}
+
+	// Print to console
+	fmt.Println(report)
 }
