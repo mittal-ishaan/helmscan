@@ -268,30 +268,14 @@ func contains(slice []string, item string) bool {
 func GenerateReport(comparison *ImageComparisonReport, generateJSON bool, generateMD bool) string {
 	var lastReport string
 
-	// Create base filename once
-	baseFilename := reports.CreateSafeFileName(
-		fmt.Sprintf("%s_to_%s_image_comparison",
-			comparison.Image1.Image,
-			comparison.Image2.Image))
-
 	// Generate markdown report if requested
 	if generateMD {
-		mdReport := generateMarkdownReport(comparison)
-		lastReport = mdReport
-
-		if err := reports.SaveToFile(mdReport, baseFilename+".md"); err != nil {
-			fmt.Printf("Error saving markdown report: %v\n", err)
-		}
+		lastReport = generateMarkdownReport(comparison)
 	}
 
 	// Generate JSON report if requested
 	if generateJSON {
-		jsonReport := generateJSONReport(comparison)
-		lastReport = jsonReport
-
-		if err := reports.SaveToFile(jsonReport, baseFilename+".json"); err != nil {
-			fmt.Printf("Error saving JSON report: %v\n", err)
-		}
+		lastReport = generateJSONReport(comparison)
 	}
 
 	return lastReport
